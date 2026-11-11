@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            libgtk-4-dev dpkg-dev xvfb xauth desktop-file-utils
+            libgtk-4-dev libadwaita-1-dev dpkg-dev xvfb xauth desktop-file-utils
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -78,23 +78,13 @@ jobs:
           cat root.txt
           grep -q 'do not run this app as root' root.txt
 
-      - name: Start the GTK app (test-hooks build) under Xvfb and take screenshots
+      - name: Screenshots of every page (test-hooks build) under Xvfb
         env:
           GSK_RENDERER: cairo
         run: |
           cargo build --release -p roxora-hwtool-gtk --features test-hooks --target-dir target-hooks
-          tests/gui/demo-root.sh "$RUNNER_TEMP/demo"
-          for page in overlays kernel boot; do
-            HWTOOL_CLI="$PWD/target/release/hwtool" HWTOOL_ROOT="$RUNNER_TEMP/demo" \
-              HWTOOL_GTK_PAGE="$page" HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/$page.png" \
-              timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" target-hooks/release/hwtool-gtk
-            test -s "screenshots/$page.png"
-          done
-          HWTOOL_CLI="$PWD/target/release/hwtool" HWTOOL_ROOT="$RUNNER_TEMP/demo" \
-            HWTOOL_GTK_PAGE=kernel HWTOOL_GTK_DEMO_BUSY=1 \
-            HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/busy.png" \
-            timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" target-hooks/release/hwtool-gtk
-          test -s screenshots/busy.png
+          xvfb-run -a -s "-screen 0 1280x1300x24" \
+            tests/gui/screenshots.sh target/release/hwtool target-hooks/release/hwtool-gtk screenshots
           ls -l screenshots
 
       - uses: actions/upload-artifact@v4
