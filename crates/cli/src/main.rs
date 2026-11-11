@@ -13,6 +13,13 @@ use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
 use hwtool_core::{kernel, migrate, overlays, Root};
 
+// Output never panics: when the terminal or the pipe to the GTK app is
+// gone, writes fail quietly and the change runs to its end or its cleanup.
+macro_rules! outln { ($($t:tt)*) => {{ use std::io::Write as _; let _ = writeln!(std::io::stdout(), $($t)*); }} }
+macro_rules! outp { ($($t:tt)*) => {{ use std::io::Write as _; let _ = write!(std::io::stdout(), $($t)*); }} }
+macro_rules! errln { ($($t:tt)*) => {{ use std::io::Write as _; let _ = writeln!(std::io::stderr(), $($t)*); }} }
+macro_rules! errp { ($($t:tt)*) => {{ use std::io::Write as _; let _ = write!(std::io::stderr(), $($t)*); }} }
+
 #[derive(Parser)]
 #[command(
     name = "hwtool",
@@ -33,7 +40,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Args, Clone, Copy)]
+#[derive(Args, Clone)]
 struct Change {
     /// Show exactly what would be run and written, and change nothing.
     #[arg(long)]
@@ -41,6 +48,11 @@ struct Change {
     /// Do not ask for confirmation.
     #[arg(short, long)]
     yes: bool,
+    /// Go ahead only if the plan has this fingerprint (from an earlier
+    /// --dry-run --json). The GTK app uses it so that what runs as root is
+    /// what the user confirmed.
+    #[arg(long, value_name = "FINGERPRINT")]
+    expect_plan: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -133,19 +145,29 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("hwtool: {e:#}");
+            errln!("hwtool: {e:#}");
             ExitCode::from(1)
         }
     }
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(v)?);
+    outln!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
 }
 
 fn run(cli: &Cli) -> Result<ExitCode> {
     let root = Root::new(&cli.root);
+    // --root is for tests. With root rights (sudo, pkexec) it could make
+    // hwtool read a boot configuration or a U-Boot writer from a directory
+    // the caller controls, so it is refused there.
+    if !root.is_system()
+        && (is_root_user()
+            || std::env::var_os("PKEXEC_UID").is_some()
+            || std::env::var_os("SUDO_UID").is_some())
+    {
+        bail!("--root is for tests and is not accepted when hwtool runs with root rights");
+    }
     let mut exec = SystemExecutor;
     match &cli.command {
         Command::Info => {
@@ -160,9 +182,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             } else {
                 match &k {
                     Ok(k) => print_kernel(k),
-                    Err(e) => println!("Kernel: {e:#}"),
+                    Err(e) => outln!("Kernel: {e:#}"),
                 }
-                println!();
+                outln!();
                 print_boot(&b);
             }
             Ok(ExitCode::SUCCESS)
@@ -178,11 +200,11 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         }
         Command::Overlays(OverlayCmd::Enable { names, change }) => {
             let p = overlays::enable(&root, names)?;
-            apply(cli, &root, &mut exec, p, *change)
+            apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Overlays(OverlayCmd::Disable { names, change }) => {
             let p = overlays::disable(&root, names)?;
-            apply(cli, &root, &mut exec, p, *change)
+            apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Kernel(KernelCmd::Status) => {
             let st = kernel::status(&root)?;
@@ -199,11 +221,11 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             change,
         }) => {
             let p = kernel::switch_plan(&root, &mut exec, branch, *keep_old, None)?;
-            apply(cli, &root, &mut exec, p, *change)
+            apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Kernel(KernelCmd::Revert { keep_old, change }) => {
             let p = kernel::revert_plan(&root, &mut exec, *keep_old)?;
-            apply(cli, &root, &mut exec, p, *change)
+            apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Boot(BootCmd::Status) => {
             let st = bootloader::status(&root);
@@ -220,7 +242,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             change,
         }) => {
             let p = bootloader::write_plan(&root, &Target::parse(target)?, *allow_booted_device)?;
-            apply(cli, &root, &mut exec, p, *change)
+            apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Boot(BootCmd::Migrate {
             target,
@@ -228,7 +250,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             change,
         }) => {
             let p = migrate::plan(&root, &mut exec, target, *write_spi)?;
-            apply(cli, &root, &mut exec, p, *change)
+            apply(cli, &root, &mut exec, p, change.clone())
         }
     }
 }
@@ -254,19 +276,25 @@ fn apply(
 ) -> Result<ExitCode> {
     if change.dry_run {
         if cli.json {
-            print_json(
-                &serde_json::json!({ "dry_run": true, "plan": plan, "text": plan.render() }),
-            )?;
+            print_json(&serde_json::json!({
+                "dry_run": true,
+                "plan": plan,
+                "text": plan.render(),
+                "fingerprint": plan.fingerprint(),
+            }))?;
         } else {
-            print!("{}", plan.render());
-            println!("\nDry run: nothing was changed.");
+            outp!("{}", plan.render());
+            outln!(
+                "\nDry run: nothing was changed. Plan fingerprint: {}",
+                plan.fingerprint()
+            );
         }
         return Ok(ExitCode::SUCCESS);
     }
     if plan.is_empty() {
-        print!("{}", plan.render());
+        outp!("{}", plan.render());
         for n in &plan.notices {
-            println!("{n}");
+            outln!("{n}");
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -285,40 +313,49 @@ fn apply(
     if root.is_system() && !is_root_user() {
         bail!("this change needs root; run it with sudo (or add --dry-run to only see it)");
     }
-    eprint!("{}", plan.render());
+    if let Some(fp) = &change.expect_plan {
+        if *fp != plan.fingerprint() {
+            bail!(
+                "the plan changed since it was confirmed (fingerprint {} instead of {fp}); \
+                 nothing was changed. Look at the new plan and confirm again",
+                plan.fingerprint()
+            );
+        }
+    }
+    errp!("{}", plan.render());
     if !change.yes {
         if !io::stdin().is_terminal() {
             bail!("not asking for confirmation without a terminal; add --yes to go ahead");
         }
-        eprint!("\nType yes to go ahead: ");
+        errp!("\nType yes to go ahead: ");
         io::stderr().flush()?;
         let mut answer = String::new();
         io::stdin().lock().read_line(&mut answer)?;
         if answer.trim() != "yes" {
-            eprintln!("Nothing was changed.");
+            errln!("Nothing was changed.");
             return Ok(ExitCode::from(3));
         }
     }
-    eprintln!();
+    errln!();
     plan.execute(root, exec, &plan::utc_stamp())?;
-    eprintln!("\nDone.");
+    errln!("\nDone.");
     if plan.reboot_required {
-        eprintln!("Reboot for the change to take effect.");
+        errln!("Reboot for the change to take effect.");
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn print_overlays(st: &overlays::Status) {
-    println!(
+    outln!(
         "Overlay prefixes (overlay_prefix in {}): {}",
         st.env_file,
         st.overlay_prefix.join(" ")
     );
     if st.overlays.is_empty() {
-        println!("The installed device tree package has no overlays for this board.");
+        outln!("The installed device tree package has no overlays for this board.");
     }
     for o in &st.overlays {
-        println!(
+        outln!(
             "  [{}] {:<28} {} {}",
             if o.enabled { "x" } else { " " },
             o.name,
@@ -327,21 +364,23 @@ fn print_overlays(st: &overlays::Status) {
         );
     }
     for m in &st.missing {
-        println!("  {m} is enabled but no file exists for it; boot.scr skips it.");
+        outln!("  {m} is enabled but no file exists for it; boot.scr skips it.");
     }
 }
 
 fn print_kernel(st: &kernel::Status) {
-    println!(
+    outln!(
         "Board: {} ({}, {})",
-        st.board.board_name, st.board.board, st.board.soc
+        st.board.board_name,
+        st.board.board,
+        st.board.soc
     );
     match (&st.current, &st.kernel) {
-        (Some(b), Some(k)) => println!("Kernel for the next boot: {k} (branch {b})"),
-        (None, Some(k)) => println!("Kernel for the next boot: {k} (not a branch hwtool knows)"),
-        _ => println!("Kernel for the next boot: unknown (/boot/Image is missing)"),
+        (Some(b), Some(k)) => outln!("Kernel for the next boot: {k} (branch {b})"),
+        (None, Some(k)) => outln!("Kernel for the next boot: {k} (not a branch hwtool knows)"),
+        _ => outln!("Kernel for the next boot: unknown (/boot/Image is missing)"),
     }
-    println!("Branches this board supports:");
+    outln!("Branches this board supports:");
     for b in &st.branches {
         let mark = if st.current.as_deref() == Some(b.branch.as_str()) {
             "*"
@@ -349,7 +388,7 @@ fn print_kernel(st: &kernel::Status) {
             " "
         };
         if b.installed.is_empty() {
-            println!(
+            outln!(
                 "  {mark} {:<8} not installed ({})",
                 b.branch,
                 b.packages.join(", ")
@@ -360,18 +399,24 @@ fn print_kernel(st: &kernel::Status) {
                 .iter()
                 .map(|p| format!("{} {}", p.name, p.version))
                 .collect();
-            println!("  {mark} {:<8} {}", b.branch, v.join(", "));
+            outln!("  {mark} {:<8} {}", b.branch, v.join(", "));
         }
     }
     if let Some(h) = st.history.last() {
-        println!(
+        outln!(
             "Last switch: {} from {} to {} ('hwtool kernel revert' goes back)",
             h.time,
             h.from_branch.as_deref().unwrap_or("unknown"),
             h.to_branch
         );
+        if h.state == "pending" {
+            outln!(
+                "  That switch did not finish. hwtool rolled it back as far as it could; \
+                 the log is in /var/log/hwtool."
+            );
+        }
         for p in &h.saved {
-            println!("  saved for the revert: {}", p.file);
+            outln!("  saved for the revert: {}", p.file);
         }
     }
 }
@@ -388,19 +433,19 @@ fn human(bytes: u64) -> String {
 fn print_boot(st: &bootloader::Status) {
     match &st.uboot {
         Some(u) => {
-            println!(
+            outln!(
                 "U-Boot package: {} {}",
                 u.package.as_deref().unwrap_or("(unknown)"),
                 u.version.as_deref().unwrap_or("")
             );
-            println!("  files in {}: {}", u.dir, u.files.join(" "));
-            println!("  writers: {}", u.functions.join(" "));
+            outln!("  files in {}: {}", u.dir, u.files.join(" "));
+            outln!("  writers: {}", u.functions.join(" "));
         }
-        None => println!("U-Boot package: none"),
+        None => outln!("U-Boot package: none"),
     }
-    println!("Disks:");
+    outln!("Disks:");
     for d in &st.disks {
-        println!(
+        outln!(
             "  {:<14} {:<5} {:>10}{}",
             d.path,
             d.kind,
@@ -409,7 +454,7 @@ fn print_boot(st: &bootloader::Status) {
         );
     }
     for m in &st.spi {
-        println!(
+        outln!(
             "  {:<14} spi   {:>10}  {}",
             m.path,
             human(m.size_bytes),
@@ -417,6 +462,6 @@ fn print_boot(st: &bootloader::Status) {
         );
     }
     for m in &st.missing {
-        println!("Not available: {m}");
+        outln!("Not available: {m}");
     }
 }

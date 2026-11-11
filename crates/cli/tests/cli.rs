@@ -114,6 +114,20 @@ fn commands_are_not_run_on_a_fake_root() {
     write(d.path(), "/usr/lib/x/u-boot-rockchip.bin", "x");
     write(d.path(), "/sys/block/mmcblk0/size", "1000000\n");
     write(d.path(), "/sys/block/mmcblk0/device/type", "MMC\n");
+    // The running system is on the SD card (mmcblk1p1, 179:97).
+    write(d.path(), "/sys/block/mmcblk1/size", "1000000\n");
+    write(d.path(), "/sys/block/mmcblk1/mmcblk1p1/partition", "1\n");
+    std::fs::create_dir_all(d.path().join("sys/dev/block")).unwrap();
+    symlink(
+        "../../block/mmcblk1/mmcblk1p1",
+        d.path().join("sys/dev/block/179:97"),
+    )
+    .unwrap();
+    write(
+        d.path(),
+        "/proc/self/mountinfo",
+        "22 1 179:97 / / rw,relatime - ext4 /dev/mmcblk1p1 rw\n",
+    );
     let o = hwtool(
         d.path(),
         &[
@@ -156,4 +170,91 @@ fn kernel_status() {
         t.contains("Kernel for the next boot: 7.3.4-edge-rockchip64 (branch edge)"),
         "{t}"
     );
+}
+
+fn hwtool_env(root: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_hwtool"))
+        .arg("--root")
+        .arg(root)
+        .args(args)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn root_option_is_refused_with_root_rights() {
+    let d = fake();
+    for var in ["SUDO_UID", "PKEXEC_UID"] {
+        let o = hwtool_env(d.path(), &[(var, "1000")], &["overlays", "list"]);
+        assert!(!o.status.success());
+        assert!(text(&o).contains("--root is for tests"), "{}", text(&o));
+    }
+}
+
+#[test]
+fn the_confirmed_plan_is_the_one_that_runs() {
+    let d = fake();
+    let o = hwtool(
+        d.path(),
+        &["--json", "overlays", "enable", "--dry-run", "--", "uart1"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let fp = v["fingerprint"].as_str().unwrap().to_string();
+    assert_eq!(fp.len(), 16);
+    // The configuration changes after the dry run: refused.
+    write(
+        d.path(),
+        "/boot/armbianEnv.txt",
+        &format!("{ENV}verbosity=7\n"),
+    );
+    let o = hwtool(
+        d.path(),
+        &[
+            "overlays",
+            "enable",
+            "--yes",
+            "--expect-plan",
+            &fp,
+            "--",
+            "uart1",
+        ],
+    );
+    assert!(!o.status.success());
+    assert!(
+        text(&o).contains("the plan changed since it was confirmed"),
+        "{}",
+        text(&o)
+    );
+    assert!(!fs::read_to_string(d.path().join("boot/armbianEnv.txt"))
+        .unwrap()
+        .contains("overlays="));
+    // A fresh dry run and its fingerprint: it runs.
+    let o = hwtool(
+        d.path(),
+        &["--json", "overlays", "enable", "--dry-run", "--", "uart1"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let fp = v["fingerprint"].as_str().unwrap().to_string();
+    let o = hwtool(
+        d.path(),
+        &[
+            "overlays",
+            "enable",
+            "--yes",
+            "--expect-plan",
+            &fp,
+            "--",
+            "uart1",
+        ],
+    );
+    assert!(o.status.success(), "{}", text(&o));
+}
+
+#[test]
+fn option_like_overlay_names_are_refused() {
+    let d = fake();
+    let o = hwtool(d.path(), &["overlays", "enable", "--dry-run", "--", "-x"]);
+    assert!(!o.status.success());
+    assert!(text(&o).contains("invalid overlay name"), "{}", text(&o));
 }
