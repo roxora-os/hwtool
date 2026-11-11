@@ -1676,7 +1676,7 @@ fn npu_page(ctx: &Shared) {
                 if can {
                     "From the Armbian repository, with apt"
                 } else if !npu_ok {
-                    "Needs the edge kernel with the rocket driver and an enabled NPU"
+                    s(&st, "verdict")
                 } else {
                     "apt has no charsiu package: is the Armbian repository enabled?"
                 },

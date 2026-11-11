@@ -115,20 +115,48 @@ fn no_driver_and_no_node() {
 }
 
 #[test]
-fn rk3588_top_level_node_and_not_loaded() {
+fn rk3588_npu_is_reported_but_charsiu_is_refused() {
     let f = rock4d();
     f.write("/proc/sys/kernel/osrelease", &format!("{EDGE_KERNEL}\n"));
     f.write(
         &format!("/lib/modules/{EDGE_KERNEL}/kernel/drivers/accel/rocket/rocket.ko"),
         "ko",
     );
-    // No status property means okay.
+    // An RK3588 NPU core (top level, no status property means okay).
     f.write(
         "/proc/device-tree/npu@fdab0000/compatible",
         "rockchip,rk3588-rknn-core\0",
     );
     let st = npu::status(&f.root(), &mut exec(POLICY)).unwrap();
     assert_eq!(st.nodes.len(), 1);
+    assert!(!st.can_install);
+    assert!(
+        st.verdict.starts_with("charsiu supports only the RK3576"),
+        "{}",
+        st.verdict
+    );
+    let err = npu::install_plan(&f.root(), &mut exec(POLICY))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("charsiu supports only the RK3576"), "{err}");
+    // An RK3588 board, even with rocket and an enabled node: refused.
+    let release = f
+        .read("/etc/armbian-release")
+        .replace("BOOT_SOC=rk3576", "BOOT_SOC=rk3588");
+    f.write("/etc/armbian-release", &release);
+    let st = npu::status(&f.root(), &mut exec(POLICY)).unwrap();
+    assert_eq!(
+        st.verdict,
+        "charsiu supports only the RK3576 (this board is rk3588)"
+    );
+    assert!(npu::install_plan(&f.root(), &mut exec(POLICY)).is_err());
+}
+
+#[test]
+fn rocket_not_loaded() {
+    let f = npu_board("okay");
+    f.write("/proc/modules", "");
+    let st = npu::status(&f.root(), &mut exec(POLICY)).unwrap();
     assert!(st.can_install && !st.ready);
     assert_eq!(
         st.verdict,

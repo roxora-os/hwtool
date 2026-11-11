@@ -322,9 +322,34 @@ pub fn status(root: &Root, exec: &mut dyn Executor) -> Result<Status> {
     let vendor = branch.as_deref().is_some_and(|b| b.starts_with("vendor"))
         || (!rocket.available() && (rknpu.available() || rknpu.loaded));
     let node_on = rocket_nodes.iter().any(|n| n.enabled());
-    let can_install = !vendor && rocket.available() && node_on;
+    // charsiu supports only the RK3576: the board's SoC and an enabled
+    // rockchip,rk3576-rknn-core node.
+    let rk3576 = board.soc == "rk3576"
+        && rocket_nodes.iter().any(|n| {
+            n.enabled()
+                && n.compatible
+                    .iter()
+                    .any(|c| c == "rockchip,rk3576-rknn-core")
+        });
+    let other_soc = board.soc != "rk3576"
+        || (!rocket_nodes.is_empty()
+            && !rocket_nodes.iter().any(|n| {
+                n.compatible
+                    .iter()
+                    .any(|c| c == "rockchip,rk3576-rknn-core")
+            }));
+    let can_install = !vendor && rocket.available() && node_on && rk3576;
     let ready = can_install && rocket.loaded && !accel.is_empty();
-    let verdict = if vendor {
+    let verdict = if other_soc {
+        format!(
+            "charsiu supports only the RK3576 (this board is {})",
+            if board.soc.is_empty() {
+                "unknown"
+            } else {
+                board.soc.as_str()
+            }
+        )
+    } else if vendor {
         "vendor kernel: charsiu needs the edge kernel's rocket driver (hwtool kernel switch edge)"
             .to_string()
     } else if !rocket.available() {

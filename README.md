@@ -18,7 +18,8 @@ hwtool changes the hardware settings of a board running a
    applied at every boot.
 7. **NPU**: show whether the NPU can run
    [charsiu](https://github.com/gahingwoo/charsiu) (the `rocket` driver, the
-   NPU device tree nodes, `/dev/accel`), and install or remove charsiu.
+   NPU device tree nodes, `/dev/accel`), and install or remove charsiu
+   (RK3576 only).
 
 It works with what the board's packages already provide: `/boot/armbianEnv.txt`
 read by `boot.scr`, the `linux-image`, `linux-dtb` and `linux-u-boot` packages

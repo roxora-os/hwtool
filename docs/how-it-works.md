@@ -331,9 +331,12 @@ mode, owner and group, and charsiu's installed version, candidate and
 origin from `apt-cache policy`, and ends in one verdict.
 
 charsiu is a package in the Armbian repository (`noble-utils`), which
-Roxora's apt pinning allows by name. `hwtool npu install-charsiu` refuses
-unless the kernel is not a vendor one, has rocket and the device tree has
-an enabled NPU node. Its plan shows `apt-get -s --no-install-recommends
+Roxora's apt pinning allows by name. charsiu supports only the RK3576, so
+`hwtool npu install-charsiu` refuses unless the board's SoC is `rk3576`,
+the kernel is not a vendor one, has rocket, and the device tree has an
+enabled `rockchip,rk3576-rknn-core` node. On other SoCs (an RK3588 with
+rocket, for example) `npu status` still reports the driver and the nodes,
+and its verdict is "charsiu supports only the RK3576". Its plan shows `apt-get -s --no-install-recommends
 install charsiu` and stops if apt would install or remove anything else;
 charsiu's Recommends (curl or wget, whiptail) are named in a notice. It
 never downloads a model: `charsiu pull` does that. `remove-charsiu` is the
