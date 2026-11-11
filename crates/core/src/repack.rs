@@ -38,7 +38,9 @@ pub fn status_paragraph(root: &Root, name: &str) -> Option<String> {
     text.split("\n\n")
         .find(|p| {
             p.lines().any(|l| l == format!("Package: {name}"))
-                && p.lines().any(|l| l == "Status: install ok installed")
+                && p.lines().any(|l| {
+                    l == "Status: install ok installed" || l == "Status: hold ok installed"
+                })
         })
         .map(str::to_string)
 }

@@ -12,7 +12,9 @@
 //! `/usr/lib/u-boot/platform_install.sh`. See `docs/how-it-works.md`.
 
 pub mod board;
+pub mod bootenv;
 pub mod bootloader;
+pub mod cpu;
 pub mod dpkg;
 pub mod env;
 pub mod exec;

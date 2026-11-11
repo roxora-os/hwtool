@@ -9,10 +9,24 @@ pub struct Package {
     pub version: String,
 }
 
-/// Packages whose status is `install ok installed`.
+/// Installed packages: status `install ok installed`, or `hold ok
+/// installed` for packages held with apt-mark.
 pub fn installed(root: &Root) -> Vec<Package> {
     let text = root.read_opt("/var/lib/dpkg/status").unwrap_or_default();
     parse_status(&text)
+}
+
+/// Names of installed packages that are held (apt-mark hold).
+pub fn held(root: &Root) -> Vec<String> {
+    let text = root.read_opt("/var/lib/dpkg/status").unwrap_or_default();
+    text.split("\n\n")
+        .filter(|p| p.lines().any(|l| l == "Status: hold ok installed"))
+        .filter_map(|p| {
+            p.lines()
+                .find_map(|l| l.strip_prefix("Package: "))
+                .map(|n| n.trim().to_string())
+        })
+        .collect()
 }
 
 pub fn parse_status(text: &str) -> Vec<Package> {
@@ -27,7 +41,7 @@ pub fn parse_status(text: &str) -> Vec<Package> {
             } else if let Some(v) = line.strip_prefix("Version: ") {
                 version = Some(v.trim().to_string());
             } else if let Some(v) = line.strip_prefix("Status: ") {
-                ok = v.trim() == "install ok installed";
+                ok = matches!(v.trim(), "install ok installed" | "hold ok installed");
             }
         }
         if let (Some(name), Some(version), true) = (name, version, ok) {

@@ -63,12 +63,36 @@ pub struct Status {
     pub kernel: Option<String>,
     pub branches: Vec<BranchInfo>,
     pub history: Vec<HistoryEntry>,
+    /// The board's kernel, device tree, header, U-Boot and firmware
+    /// packages that are installed.
+    pub hardware_packages: Vec<String>,
+    /// Those of them held with apt-mark (not upgraded by apt).
+    pub held: Vec<String>,
+    /// Kernel modules DKMS builds (directories in /var/lib/dkms).
+    pub dkms: Vec<String>,
 }
 
 pub fn read_history(root: &Root) -> Vec<HistoryEntry> {
     root.read_opt(HISTORY_FILE)
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
+}
+
+/// The board's installed hardware packages, as Roxora's apt pinning names
+/// them: kernel, device tree, headers and U-Boot of any branch, firmware.
+pub fn hardware_packages(board: &Board, installed: &[Package]) -> Vec<String> {
+    installed
+        .iter()
+        .filter(|p| {
+            board.branches.iter().any(|b| {
+                p.name == board.image_package(b)
+                    || p.name == board.dtb_package(b)
+                    || p.name == board.headers_package(b)
+                    || p.name == board.uboot_package(b)
+            }) || p.name.starts_with("armbian-firmware")
+        })
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 fn branch_packages(board: &Board, branch: &str) -> Vec<String> {
@@ -134,7 +158,19 @@ pub fn status(root: &Root) -> Result<Status> {
                 .collect();
             (with_image.len() == 1).then(|| with_image[0].branch.clone())
         });
+    let hardware_packages = hardware_packages(&board, &installed);
+    let held: Vec<String> = dpkg::held(root)
+        .into_iter()
+        .filter(|h| hardware_packages.contains(h))
+        .collect();
     Ok(Status {
+        hardware_packages,
+        held,
+        dkms: root
+            .list_dir("/var/lib/dkms")
+            .into_iter()
+            .filter(|d| root.path(&format!("/var/lib/dkms/{d}")).is_dir())
+            .collect(),
         history: read_history(root),
         board,
         current,
@@ -167,6 +203,13 @@ pub fn switch_plan(
             "{} supports the kernel branches {}; {target} is not one of them",
             board.board_name,
             board.branches.join(", ")
+        );
+    }
+    if !st.held.is_empty() {
+        bail!(
+            "the kernel packages are held ({}); release them first with 'hwtool kernel unhold', \
+             then switch",
+            st.held.join(", ")
         );
     }
     let installed = dpkg::installed(root);
@@ -632,4 +675,118 @@ pub fn verify_installed(root: &Root, suffix: &str) -> Result<()> {
         }
         None => Ok(()),
     }
+}
+
+/// Hold or release the board's hardware packages with apt-mark, so apt
+/// upgrades do not change the kernel, device tree, U-Boot or firmware.
+pub fn hold_plan(root: &Root, hold: bool) -> Result<Plan> {
+    let st = status(root)?;
+    let targets: Vec<String> = if hold {
+        st.hardware_packages
+            .iter()
+            .filter(|p| !st.held.contains(p))
+            .cloned()
+            .collect()
+    } else {
+        st.held.clone()
+    };
+    let mut p = Plan::new(if hold {
+        "Hold the kernel, device tree, U-Boot and firmware packages".to_string()
+    } else {
+        "Release the held kernel, device tree, U-Boot and firmware packages".to_string()
+    });
+    if targets.is_empty() {
+        p.notices.push(if hold {
+            "They are already held.".into()
+        } else {
+            "None of them is held.".into()
+        });
+        return Ok(p);
+    }
+    let mut a = vec!["apt-mark", if hold { "hold" } else { "unhold" }];
+    a.extend(targets.iter().map(String::as_str));
+    p.run(
+        if hold {
+            "Hold the packages (apt will not upgrade or remove them)"
+        } else {
+            "Release the packages (apt upgrades them again)"
+        },
+        &a,
+    );
+    if hold {
+        p.notices.push(
+            "Security fixes for the kernel arrive through these packages; while they are held \
+             they do not reach this system. 'hwtool kernel switch' refuses until you release them."
+                .into(),
+        );
+    }
+    Ok(p)
+}
+
+/// Install or remove the headers of the branch in use
+/// (linux-headers-<branch>-<family>; Roxora's pinning allows them).
+pub fn headers_plan(root: &Root, exec: &mut dyn Executor, install: bool) -> Result<Plan> {
+    let st = status(root)?;
+    let branch = st
+        .current
+        .clone()
+        .context("cannot tell which kernel branch is in use")?;
+    let pkg = st.board.headers_package(&branch);
+    let installed = dpkg::installed(root);
+    let have = installed.iter().find(|p| p.name == pkg);
+    if install && have.is_some() {
+        bail!("{pkg} is already installed");
+    }
+    if !install && have.is_none() {
+        bail!("{pkg} is not installed");
+    }
+    if st.held.contains(&pkg) {
+        bail!("{pkg} is held; release it first with 'hwtool kernel unhold'");
+    }
+    if install && policy(exec, &pkg)?.candidate.is_none() {
+        bail!("apt has no installable version of {pkg}; check the Armbian repository and run apt-get update");
+    }
+    let verb = if install { "install" } else { "remove" };
+    let sim = argv(&["apt-get", "-s", "-y", "--no-install-recommends", verb, &pkg]);
+    let r = apt_simulate(exec, &sim)?;
+    if !r.removed.iter().all(|x| *x == pkg) {
+        let extra: Vec<&String> = r.removed.iter().filter(|x| **x != pkg).collect();
+        bail!(
+            "{verb}ing {pkg} would also remove {}; hwtool stops here. Check with: {}",
+            extra
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            plan::shell_join(&sim)
+        );
+    }
+    let mut p = Plan::new(format!(
+        "{} the kernel headers for {} ({pkg})",
+        if install { "Install" } else { "Remove" },
+        st.kernel.as_deref().unwrap_or(&branch)
+    ));
+    p.run(
+        format!("{} {pkg}", if install { "Install" } else { "Remove" }),
+        &["apt-get", verb, "-y", "--no-install-recommends", &pkg],
+    );
+    p.steps[0].details = r.lines;
+    if install {
+        p.notices.push(
+            "With headers installed, DKMS builds its modules for each new kernel of this branch."
+                .into(),
+        );
+    } else if !st.dkms.is_empty() {
+        p.warnings.push(format!(
+            "DKMS modules are installed ({}). Without headers they cannot be rebuilt when the \
+             kernel is next updated, and will be missing from the new kernel{}.",
+            st.dkms.join(", "),
+            if st.dkms.iter().any(|d| d.contains("aic8800")) {
+                " (aic8800 is the ROCK 4D's Wi-Fi and Bluetooth driver)"
+            } else {
+                ""
+            }
+        ));
+    }
+    Ok(p)
 }

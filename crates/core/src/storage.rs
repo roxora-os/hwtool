@@ -241,6 +241,11 @@ pub fn disks(root: &Root) -> Vec<Disk> {
             "nvme"
         } else if root.read_link(&base).is_some_and(|t| t.contains("/usb")) {
             "usb"
+        } else if root
+            .read_link(&base)
+            .is_some_and(|t| t.contains("/ata") || t.contains("/ahci"))
+        {
+            "sata"
         } else {
             "disk"
         };

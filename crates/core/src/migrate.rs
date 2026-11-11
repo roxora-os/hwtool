@@ -49,6 +49,75 @@ const TOOLS: &[(&str, &str)] = &[
     ("udevadm", "udev"),
 ];
 
+/// A USB or SATA drive can hold the system only when U-Boot runs from SPI
+/// flash (U-Boot on SD or eMMC checks those first and boots them), is built
+/// with the drivers for the drive, and scans it. The facts come from the
+/// installed U-Boot package: its SPI writer, its build configuration
+/// (u-boot-config-target-*) and the boot_targets in its SPI image.
+fn external_boot_supported(root: &Root, kind: &str, write_spi: bool) -> Result<()> {
+    let u = bootloader::detect(root).context("no U-Boot package is installed")?;
+    if !u.has("write_uboot_platform_mtd") {
+        bail!(
+            "starting from a {kind} drive needs U-Boot in SPI flash, and this board's U-Boot \
+             package has no SPI writer: its U-Boot lives on the SD card or eMMC, which it checks \
+             before {kind} and boots instead"
+        );
+    }
+    let config: String = u
+        .files
+        .iter()
+        .filter(|f| f.starts_with("u-boot-config-target-"))
+        .filter_map(|f| root.read_opt(&format!("{}/{f}", u.dir)))
+        .collect();
+    let (needed, scan): (&[&str], &str) = if kind == "usb" {
+        (&["CONFIG_USB_STORAGE=y"], "usb")
+    } else {
+        (
+            &["CONFIG_AHCI=y", "CONFIG_SATA=y", "CONFIG_DWC_AHCI=y"],
+            "scsi",
+        )
+    };
+    if !needed.iter().any(|n| config.lines().any(|l| l == *n)) {
+        bail!(
+            "this board's U-Boot ({}) is built without {} support ({} not set), so it cannot \
+             start from a {kind} drive",
+            u.package.as_deref().unwrap_or("the installed package"),
+            kind.to_uppercase(),
+            needed.join(" or ")
+        );
+    }
+    let targets = u
+        .files
+        .iter()
+        .filter(|f| f.contains("spi"))
+        .filter_map(|f| std::fs::read(root.path(&format!("{}/{f}", u.dir))).ok())
+        .find_map(|b| boot_targets(&b));
+    match targets {
+        Some(t) if t.split_whitespace().any(|x| x == scan) => {}
+        Some(t) => bail!("this board's SPI U-Boot scans {t}, not {scan}"),
+        None => bail!("cannot find boot_targets in this board's SPI U-Boot image"),
+    }
+    if !write_spi {
+        bail!(
+            "a {kind} drive starts only from the U-Boot in SPI flash; add --write-spi so it is \
+             the installed package's U-Boot, which hwtool has checked"
+        );
+    }
+    Ok(())
+}
+
+/// `boot_targets=...` from a U-Boot image's default environment.
+pub fn boot_targets(image: &[u8]) -> Option<String> {
+    let key = b"boot_targets=";
+    let i = image.windows(key.len()).position(|w| w == key)?;
+    let rest = &image[i + key.len()..];
+    let end = rest
+        .iter()
+        .position(|b| *b == 0 || *b == b'\n')
+        .unwrap_or(rest.len().min(200));
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+}
+
 /// First partition offset: 16 MiB on eMMC, room for U-Boot
 /// (install_plan_layout), 1 MiB elsewhere.
 fn start_mib(kind: &str) -> u32 {
@@ -84,7 +153,11 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
     let mode = match disk.kind.as_str() {
         "emmc" => "emmc",
         "nvme" => "nvme",
-        k => bail!("{target} is a {k} device; hwtool moves the system to eMMC or NVMe only"),
+        k @ ("usb" | "sata") => {
+            external_boot_supported(root, k, write_spi)?;
+            k
+        }
+        k => bail!("{target} is a {k} device; hwtool moves the system to eMMC, NVMe or USB only"),
     };
     let missing: Vec<String> = TOOLS
         .iter()
@@ -294,6 +367,14 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
     );
 
     p.warnings.push(format!("Everything on {t} is erased."));
+    if mode == "usb" || mode == "sata" {
+        p.notices.push(
+            "U-Boot in SPI flash checks the SD card, the eMMC, then SCSI and NVMe drives before \
+             USB (boot_targets in its image). Remove the SD card, and make sure the eMMC and any \
+             NVMe drive hold no bootable system, or the board starts that instead."
+                .into(),
+        );
+    }
     match mode {
         "emmc" => p.notices.push(
             "Power off, remove the SD card, then start the board from the eMMC. Keep the SD \
@@ -304,7 +385,7 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
         ),
         _ => p.notices.push(if write_spi {
             "U-Boot is written to SPI flash. Power off, remove the SD card and start the board: \
-             U-Boot in SPI flash looks for /boot on the NVMe drive."
+             U-Boot in SPI flash looks for /boot on the new drive."
                 .to_string()
         } else {
             "No bootloader is written. The board needs a U-Boot that looks for /boot on NVMe, \

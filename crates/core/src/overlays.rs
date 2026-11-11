@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::env::BootEnv;
@@ -251,4 +251,215 @@ fn validate_name(name: &str) -> Result<()> {
         bail!("invalid overlay name {name:?}");
     }
     Ok(())
+}
+
+/// Board compatibles from the running device tree.
+fn board_compatibles(root: &Root) -> Vec<String> {
+    for base in ["/sys/firmware/devicetree/base", "/proc/device-tree"] {
+        if let Ok(b) = std::fs::read(root.path(&format!("{base}/compatible"))) {
+            return b
+                .split(|c| *c == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// The compatible strings an overlay source declares at its root node.
+pub fn overlay_compatibles(src: &str) -> Vec<String> {
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let t = line.trim();
+        if depth == 1 && t.starts_with("compatible") && t.contains('=') {
+            out.extend(t.split('"').skip(1).step_by(2).map(str::to_string));
+        }
+        depth += t.matches('{').count() as i32 - t.matches('}').count() as i32;
+    }
+    out
+}
+
+fn fnv(data: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in data {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Compile a .dts or .dtso overlay, install it in /boot/overlay-user and
+/// enable it through user_overlays= (what armbian-add-overlay does, without
+/// the C preprocessor). Installs device-tree-compiler from Ubuntu first if
+/// dtc is missing.
+pub fn add_plan(root: &Root, exec: &mut dyn crate::exec::Executor, file: &str) -> Result<Plan> {
+    let path = std::path::Path::new(file);
+    let name = match (path.file_stem(), path.extension().and_then(|e| e.to_str())) {
+        (Some(stem), Some("dts" | "dtso")) => stem.to_string_lossy().into_owned(),
+        _ => bail!("{file}: an overlay source ends in .dts or .dtso"),
+    };
+    validate_name(&name)?;
+    let data = std::fs::read(path).with_context(|| format!("cannot read {file}"))?;
+    let src = String::from_utf8_lossy(&data);
+    if !src.contains("/plugin/") {
+        bail!("{file} is not an overlay: it has no /plugin/ line");
+    }
+    if src.lines().any(|l| l.trim_start().starts_with("#include")) {
+        bail!(
+            "{file} uses #include, which needs the kernel headers and the C preprocessor; \
+             compile it with armbian-add-overlay, then enable it here"
+        );
+    }
+    let dst = format!("{USER_OVERLAY_DIR}/{name}.dtbo");
+    if root.exists(&dst) {
+        bail!("{dst} already exists; remove it first with 'hwtool overlays remove {name}'");
+    }
+    let wanted = overlay_compatibles(&src);
+    let board = board_compatibles(root);
+    let mut notices = Vec::new();
+    if !wanted.is_empty() {
+        if board.is_empty() {
+            notices.push(format!(
+                "Could not read the board's compatible strings; not checked against {}.",
+                wanted.join(", ")
+            ));
+        } else if !wanted.iter().any(|w| board.contains(w)) {
+            bail!(
+                "{file} is for {}, and this board is {}",
+                wanted.join(", "),
+                board.join(", ")
+            );
+        }
+    }
+    let before = load_env(root)?;
+    let mut env = before.clone();
+    let mut users = env.list("user_overlays");
+    if !users.contains(&name) {
+        users.push(name.clone());
+    }
+    env.set_list("user_overlays", &users);
+
+    let mut p = Plan::new(format!("Add the user overlay {name} from {file}"));
+    if !root.has_program("dtc") {
+        let sim = vec![
+            "apt-get".to_string(),
+            "-s".into(),
+            "-y".into(),
+            "--no-install-recommends".into(),
+            "install".into(),
+            "device-tree-compiler".into(),
+        ];
+        let out = exec
+            .capture(&sim)
+            .context("apt cannot resolve device-tree-compiler")?;
+        let removals: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("Remv ") || l.starts_with("Purg "))
+            .collect();
+        if !removals.is_empty() {
+            bail!(
+                "installing device-tree-compiler would also remove: {}",
+                removals.join("; ")
+            );
+        }
+        p.run(
+            "Install the device tree compiler",
+            &[
+                "apt-get",
+                "install",
+                "-y",
+                "--no-install-recommends",
+                "device-tree-compiler",
+            ],
+        );
+        p.steps[0].details = std::iter::once("apt resolves:".to_string())
+            .chain(
+                out.lines()
+                    .filter(|l| l.starts_with("Inst "))
+                    .map(|l| format!("  {l}")),
+            )
+            .collect();
+    }
+    let tmp = format!("/run/hwtool/{name}.dtbo");
+    p.run("Make the work directory", &["mkdir", "-p", "/run/hwtool"]);
+    p.run(
+        format!("Compile {file} (content {})", fnv(&data)),
+        &[
+            "dtc", "-@", "-q", "-I", "dts", "-O", "dtb", "-o", &tmp, file,
+        ],
+    );
+    let install_at = p.steps.len();
+    p.run(
+        format!("Install it as {dst}"),
+        &["install", "-D", "-m", "0644", &tmp, &dst],
+    );
+    p.step(
+        format!("Back up {ENV_FILE}"),
+        Action::Backup {
+            path: ENV_FILE.into(),
+        },
+    );
+    p.step(
+        format!("Enable it in {ENV_FILE}"),
+        Action::WriteFile {
+            path: ENV_FILE.into(),
+            content: env.render(),
+        },
+    );
+    let last = p.steps.len() - 1;
+    p.on_failure(
+        install_at,
+        last,
+        format!("Remove {dst}"),
+        Action::Run {
+            argv: vec!["rm".into(), "-f".into(), dst.clone()],
+        },
+    );
+    p.notices = notices;
+    p.notices
+        .push(format!("boot.scr will load {dst} at the next boot."));
+    p.reboot_required = true;
+    Ok(p)
+}
+
+/// Remove a user overlay: disable it and delete its file (after a backup).
+pub fn remove_plan(root: &Root, name: &str) -> Result<Plan> {
+    validate_name(name)?;
+    let dst = format!("{USER_OVERLAY_DIR}/{name}.dtbo");
+    if !root.exists(&dst) {
+        bail!(
+            "{dst} does not exist; only overlays in {USER_OVERLAY_DIR} can be removed \
+             (kernel overlays can only be disabled)"
+        );
+    }
+    let before = load_env(root)?;
+    let mut env = before.clone();
+    let mut users = env.list("user_overlays");
+    users.retain(|n| n != name);
+    env.set_list("user_overlays", &users);
+    let mut p = Plan::new(format!("Remove the user overlay {name}"));
+    if env != before {
+        p.step(
+            format!("Back up {ENV_FILE}"),
+            Action::Backup {
+                path: ENV_FILE.into(),
+            },
+        );
+        p.step(
+            format!("Disable it in {ENV_FILE}"),
+            Action::WriteFile {
+                path: ENV_FILE.into(),
+                content: env.render(),
+            },
+        );
+    }
+    p.step(
+        format!("Back up {dst}"),
+        Action::Backup { path: dst.clone() },
+    );
+    p.run(format!("Delete {dst}"), &["rm", "-f", &dst]);
+    p.reboot_required = true;
+    Ok(p)
 }

@@ -52,6 +52,9 @@ pub enum Action {
     ReportBoot,
     /// Print the NPU and charsiu status. Never fails.
     NpuStatus,
+    /// Write a value to a sysfs file (no temporary file: sysfs takes writes
+    /// in place).
+    SysfsWrite { path: String, value: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -370,6 +373,9 @@ fn render_action(out: &mut String, action: &Action) {
         Action::NpuStatus => {
             let _ = writeln!(out, "    show the rocket driver, /dev/accel and charsiu");
         }
+        Action::SysfsWrite { path, value } => {
+            let _ = writeln!(out, "    write {value} to {path}");
+        }
     }
 }
 
@@ -443,6 +449,8 @@ fn apply(root: &Root, exec: &mut dyn Executor, stamp: &str, action: &Action) -> 
             crate::npu::report(root, exec);
             Ok(())
         }
+        Action::SysfsWrite { path, value } => fs::write(root.path(path), value)
+            .with_context(|| format!("cannot write {value} to {path}")),
         Action::ReportBoot => {
             for l in ["/boot/Image", "/boot/dtb", "/boot/uInitrd"] {
                 let t = root
