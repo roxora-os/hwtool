@@ -341,24 +341,36 @@ pub fn switch_plan(
         );
     }
     if !old.is_empty() {
-        let mut undo = vec![
-            "apt-get".to_string(),
-            "install".into(),
-            "-y".into(),
-            "--reinstall".into(),
-            "--allow-downgrades".into(),
-        ];
-        undo.extend(old.iter().map(|p| {
-            saved
-                .iter()
-                .find(|s| s.name == p.name)
-                .map(|s| s.file.clone())
-                .unwrap_or_else(|| format!("{}={}", p.name, p.version))
-        }));
+        // Use a saved file only if the save step got that far.
+        let mut script = String::from("set -e\npkgs=()\n");
+        let mut shows = Vec::new();
+        for o in &old {
+            let spec = format!("{}={}", o.name, o.version);
+            match saved.iter().find(|s| s.name == o.name) {
+                Some(f) => {
+                    script.push_str(&format!(
+                        "if [ -f '{0}' ]; then pkgs+=('{0}'); else pkgs+=('{spec}'); fi\n",
+                        f.file
+                    ));
+                    shows.push(format!("{} (or {spec} if it was not saved yet)", f.file));
+                }
+                None => {
+                    script.push_str(&format!("pkgs+=('{spec}')\n"));
+                    shows.push(spec);
+                }
+            }
+        }
+        script.push_str("apt-get install -y --reinstall --allow-downgrades \"${pkgs[@]}\"\n");
         p.cleanup.push(plan::Step {
             description: "Reinstall the old packages so /boot points at the old kernel again"
                 .into(),
-            action: Action::Run { argv: undo },
+            action: Action::Shell {
+                script,
+                shows: vec![format!(
+                    "apt-get install -y --reinstall --allow-downgrades {}",
+                    shows.join(" ")
+                )],
+            },
         });
     }
     let overlays = env.list("overlays");

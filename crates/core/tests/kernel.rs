@@ -46,6 +46,23 @@ impl Executor for FakeApt<'_> {
             .as_slice()
         {
             ["apt-get", "update"] => Ok(()),
+            ["bash", "-c", script] => {
+                // The cleanup script: pick saved files that exist, else name=version.
+                let mut args: Vec<String> = ["apt-get", "install", "-y", "--reinstall"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                for line in script.lines() {
+                    let q: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+                    if line.starts_with("if [ -f") {
+                        args.push(if self.f.p(q[0]).exists() { q[1] } else { q[2] }.to_string());
+                    } else if line.starts_with("pkgs+=") {
+                        args.push(q[0].to_string());
+                    }
+                }
+                self.ran.pop();
+                self.run(&args)
+            }
             ["dpkg-deb", "--root-owner-group", "--build", staging, out] => {
                 assert!(std::path::Path::new(staging)
                     .join("DEBIAN/control")
