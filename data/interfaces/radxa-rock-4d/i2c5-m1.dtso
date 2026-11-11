@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// I2C5 (M1). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "radxa,rock-4d", "rockchip,rk3576";
+};
+
+&i2c5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c5m1_xfer>;
+	status = "okay";
+};

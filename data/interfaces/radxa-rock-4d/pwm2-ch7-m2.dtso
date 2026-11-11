@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// PWM2 channel 7 (M2). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "radxa,rock-4d", "rockchip,rk3576";
+};
+
+&pwm2_8ch_7 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm2m2_ch7>;
+	status = "okay";
+};

@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// SPI3 (M0) with spidev on CS0. Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "armsom,cm5-io", "rockchip,rk3576";
+};
+
+&spi3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi3m0_csn0 &spi3m0_pins>;
+	status = "okay";
+
+	spidev@0 {
+		compatible = "rockchip,spidev";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+	};
+};

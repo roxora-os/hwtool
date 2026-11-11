@@ -1,0 +1,233 @@
+{
+  "board": "armsom-cm5-io",
+  "busy": {
+    "8": "console UART0 TX",
+    "10": "console UART0 RX",
+    "16": "red LED (led-1)",
+    "18": "green LED (led-0)",
+    "28": "fan control"
+  },
+  "gpio": {
+    "3": "GPIO4_B4",
+    "5": "GPIO4_B5",
+    "7": "GPIO0_C4",
+    "8": "GPIO0_D4",
+    "10": "GPIO0_D5",
+    "16": "GPIO2_D1",
+    "18": "GPIO2_D0",
+    "19": "GPIO3_A1",
+    "21": "GPIO3_A2",
+    "23": "GPIO3_A0",
+    "24": "GPIO3_A3",
+    "27": "GPIO3_B7",
+    "28": "GPIO2_D6",
+    "29": "GPIO3_C0",
+    "31": "GPIO3_D6"
+  },
+  "interfaces": [
+    {
+      "name": "i2c3-m0",
+      "kind": "i2c",
+      "title": "I2C3 (M0)",
+      "node": "i2c3",
+      "groups": [
+        "i2c3m0_xfer"
+      ],
+      "pins": [
+        {
+          "pin": 3,
+          "signal": "SDA",
+          "gpio": "GPIO4_B4"
+        },
+        {
+          "pin": 5,
+          "signal": "SCL",
+          "gpio": "GPIO4_B5"
+        }
+      ]
+    },
+    {
+      "name": "i2c4-m3",
+      "kind": "i2c",
+      "title": "I2C4 (M3)",
+      "node": "i2c4",
+      "groups": [
+        "i2c4m3_xfer"
+      ],
+      "pins": [
+        {
+          "pin": 27,
+          "signal": "SDA",
+          "gpio": "GPIO3_B7"
+        },
+        {
+          "pin": 29,
+          "signal": "SCL",
+          "gpio": "GPIO3_C0"
+        }
+      ]
+    },
+    {
+      "name": "i2c7-m1",
+      "kind": "i2c",
+      "title": "I2C7 (M1)",
+      "node": "i2c7",
+      "groups": [
+        "i2c7m1_xfer"
+      ],
+      "pins": [
+        {
+          "pin": 19,
+          "signal": "SDA",
+          "gpio": "GPIO3_A1"
+        },
+        {
+          "pin": 23,
+          "signal": "SCL",
+          "gpio": "GPIO3_A0"
+        }
+      ]
+    },
+    {
+      "name": "uart2-m1",
+      "kind": "uart",
+      "title": "UART2 (M1)",
+      "node": "uart2",
+      "groups": [
+        "uart2m1_xfer"
+      ],
+      "pins": [
+        {
+          "pin": 3,
+          "signal": "RX",
+          "gpio": "GPIO4_B4"
+        },
+        {
+          "pin": 5,
+          "signal": "TX",
+          "gpio": "GPIO4_B5"
+        }
+      ]
+    },
+    {
+      "name": "uart2-m2",
+      "kind": "uart",
+      "title": "UART2 (M2)",
+      "node": "uart2",
+      "groups": [
+        "uart2m2_xfer"
+      ],
+      "pins": [
+        {
+          "pin": 27,
+          "signal": "RX",
+          "gpio": "GPIO3_B7"
+        },
+        {
+          "pin": 29,
+          "signal": "TX",
+          "gpio": "GPIO3_C0"
+        }
+      ]
+    },
+    {
+      "name": "uart3-m0",
+      "kind": "uart",
+      "title": "UART3 (M0)",
+      "node": "uart3",
+      "groups": [
+        "uart3m0_xfer"
+      ],
+      "pins": [
+        {
+          "pin": 19,
+          "signal": "RX",
+          "gpio": "GPIO3_A1"
+        },
+        {
+          "pin": 23,
+          "signal": "TX",
+          "gpio": "GPIO3_A0"
+        }
+      ]
+    },
+    {
+      "name": "spi3-m0",
+      "kind": "spi",
+      "title": "SPI3 (M0) with spidev on CS0",
+      "node": "spi3",
+      "groups": [
+        "spi3m0_csn0",
+        "spi3m0_pins"
+      ],
+      "pins": [
+        {
+          "pin": 19,
+          "signal": "MOSI",
+          "gpio": "GPIO3_A1"
+        },
+        {
+          "pin": 21,
+          "signal": "MISO",
+          "gpio": "GPIO3_A2"
+        },
+        {
+          "pin": 23,
+          "signal": "CLK",
+          "gpio": "GPIO3_A0"
+        },
+        {
+          "pin": 24,
+          "signal": "CS0",
+          "gpio": "GPIO3_A3"
+        }
+      ]
+    },
+    {
+      "name": "pwm0-ch0-m0",
+      "kind": "pwm",
+      "title": "PWM0 channel 0 (M0)",
+      "node": "pwm0_2ch_0",
+      "groups": [
+        "pwm0m0_ch0"
+      ],
+      "pins": [
+        {
+          "pin": 7,
+          "signal": "PWM",
+          "gpio": "GPIO0_C4"
+        }
+      ]
+    },
+    {
+      "name": "pwm2-ch6-m3",
+      "kind": "pwm",
+      "title": "PWM2 channel 6 (M3)",
+      "node": "pwm2_8ch_6",
+      "groups": [
+        "pwm2m3_ch6"
+      ],
+      "pins": [
+        {
+          "pin": 31,
+          "signal": "PWM",
+          "gpio": "GPIO3_D6"
+        }
+      ]
+    },
+    {
+      "name": "w1-gpio-pin7",
+      "kind": "w1",
+      "title": "1-Wire on pin 7 (GPIO0_C4)",
+      "node": "gpio0",
+      "groups": [],
+      "pins": [
+        {
+          "pin": 7,
+          "signal": "DQ",
+          "gpio": "GPIO0_C4"
+        }
+      ]
+    }
+  ]
+}

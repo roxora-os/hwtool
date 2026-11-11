@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// PWM1 channel 0 (M1). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "radxa,rock-4d", "rockchip,rk3576";
+};
+
+&pwm1_6ch_0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm1m1_ch0>;
+	status = "okay";
+};

@@ -18,6 +18,7 @@ pub mod cpu;
 pub mod dpkg;
 pub mod env;
 pub mod exec;
+pub mod interfaces;
 pub mod kernel;
 pub mod migrate;
 pub mod npu;

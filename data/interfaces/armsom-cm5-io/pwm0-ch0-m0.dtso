@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// PWM0 channel 0 (M0). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "armsom,cm5-io", "rockchip,rk3576";
+};
+
+&pwm0_2ch_0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm0m0_ch0>;
+	status = "okay";
+};

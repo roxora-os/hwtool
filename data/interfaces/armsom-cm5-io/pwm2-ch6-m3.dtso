@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// PWM2 channel 6 (M3). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "armsom,cm5-io", "rockchip,rk3576";
+};
+
+&pwm2_8ch_6 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm2m3_ch6>;
+	status = "okay";
+};

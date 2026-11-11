@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// I2C4 (M3). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "armsom,cm5-io", "rockchip,rk3576";
+};
+
+&i2c4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4m3_xfer>;
+	status = "okay";
+};

@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// SPI2 (M1) with spidev on CS0 and CS1. Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "radxa,rock-4d", "rockchip,rk3576";
+};
+
+&spi2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi2m1_csn0 &spi2m1_csn1 &spi2m1_pins>;
+	status = "okay";
+
+	spidev@0 {
+		compatible = "rockchip,spidev";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+	};
+
+	spidev@1 {
+		compatible = "rockchip,spidev";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+	};
+};

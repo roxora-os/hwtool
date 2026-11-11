@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// UART4 (M1). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "radxa,rock-4d", "rockchip,rk3576";
+};
+
+&uart4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart4m1_xfer>;
+	status = "okay";
+};

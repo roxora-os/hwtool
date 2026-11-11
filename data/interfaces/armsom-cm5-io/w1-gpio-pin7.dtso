@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// 1-Wire on pin 7 (GPIO0_C4). Written by tools/gen-interfaces.py.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "armsom,cm5-io", "rockchip,rk3576";
+};
+
+&{/} {
+	onewire {
+		compatible = "w1-gpio";
+		gpios = <&gpio0 20 0>;
+	};
+};
