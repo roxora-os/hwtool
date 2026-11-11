@@ -130,6 +130,9 @@ pub fn save(
         fs::remove_dir_all(&st)?;
     }
     fs::create_dir_all(st.join("DEBIAN"))?;
+    for d in [st.clone(), st.join("DEBIAN")] {
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755))?;
+    }
     fs::write(st.join("DEBIAN/control"), control(&para))?;
     for s in ["preinst", "postinst", "prerm", "postrm", "config"] {
         if let Some(f) = info_file(root, name, &arch, s) {
@@ -159,10 +162,12 @@ pub fn save(
     let list_file = info_file(root, name, &arch, "list")
         .with_context(|| format!("dpkg has no file list for {name}"))?;
     let mut missing = Vec::new();
-    for path in root.read(&list_file)?.lines() {
-        if path.is_empty() || path == "/." {
-            continue;
-        }
+    let list = root.read(&list_file)?;
+    let paths: Vec<&str> = list
+        .lines()
+        .filter(|p| !p.is_empty() && *p != "/.")
+        .collect();
+    for path in paths.iter().copied() {
         let src = root.path(path);
         let dst = st.join(path.trim_start_matches('/'));
         let meta = match fs::symlink_metadata(&src) {
@@ -175,11 +180,19 @@ pub fn save(
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
-        if meta.file_type().is_symlink() {
+        // With merged /usr, /lib is a symlink on the system although the
+        // package ships it as a directory: a listed path with listed
+        // entries below it is packaged as a directory.
+        let below = format!("{path}/");
+        let parent_of_listed = paths.iter().any(|p| p.starts_with(&below));
+        if meta.file_type().is_symlink() && !parent_of_listed {
             symlink(fs::read_link(&src)?, &dst)?;
-        } else if meta.is_dir() {
+        } else if meta.is_dir() || parent_of_listed {
+            let mode = fs::metadata(&src)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0o755);
             fs::create_dir_all(&dst)?;
-            fs::set_permissions(&dst, fs::Permissions::from_mode(meta.permissions().mode()))?;
+            fs::set_permissions(&dst, fs::Permissions::from_mode(mode))?;
         } else {
             fs::copy(&src, &dst).with_context(|| format!("cannot copy {path}"))?;
         }

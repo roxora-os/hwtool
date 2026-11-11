@@ -45,10 +45,13 @@ fn rebuilds_from_the_dpkg_database() {
         std::fs::Permissions::from_mode(0o640),
     )
     .unwrap();
+    // Merged /usr: /lib is a symlink on the system, a directory in the package.
+    f.write("/usr/lib/modules/7.3.4/kernel.ko", "ko");
+    std::os::unix::fs::symlink("usr/lib", f.p("/lib")).unwrap();
     f.write(
         &format!("/var/lib/dpkg/info/{name}.list"),
         &format!(
-            "/.\n/etc\n/etc/test.conf\n/usr\n/usr/lib\n{d}\n{d}/u-boot-rockchip.bin\n{d}/u-boot.link\n\
+            "/.\n/lib\n/lib/modules\n/lib/modules/7.3.4\n/lib/modules/7.3.4/kernel.ko\n/etc\n/etc/test.conf\n/usr\n/usr/lib\n{d}\n{d}/u-boot-rockchip.bin\n{d}/u-boot.link\n\
              /usr/lib/u-boot\n/usr/lib/u-boot/platform_install.sh\n{d}/gone.bin\n"
         ),
     );
@@ -95,6 +98,12 @@ fn rebuilds_from_the_dpkg_database() {
         "{list}"
     );
     assert!(list.contains("./etc/test.conf"), "{list}");
+    assert!(
+        list.lines()
+            .any(|l| l.starts_with('d') && l.ends_with(" ./lib/")),
+        "{list}"
+    );
+    assert!(list.contains("./lib/modules/7.3.4/kernel.ko"), "{list}");
     assert!(!list.contains("gone.bin"), "{list}");
     // The staging directory is gone.
     assert_eq!(
