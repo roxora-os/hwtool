@@ -24,6 +24,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Rebuild the index of the fake repository after removing a package.
+reindex() {
+  (
+    cd "$1"
+    dpkg-scanpackages --multiversion . >Packages 2>/dev/null
+    apt-ftparchive -o APT::FTPArchive::Release::Origin=Armbian \
+      -o APT::FTPArchive::Release::Label=Armbian release . >/tmp/Release
+    mv /tmp/Release Release
+  )
+}
 step() { printf '\n=== %s\n' "$*"; }
 in_root() { chroot "$r" env LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive "$@"; }
 fail() {
@@ -103,6 +113,14 @@ if in_root hwtool kernel switch vendor </dev/null; then
 fi
 
 step "switch to vendor"
+# apt keeps the .deb files it downloaded; drop the kernel image so that one
+# is saved by rebuilding it from the dpkg database instead of copied.
+ls "$r"/var/cache/apt/archives/linux-*.deb
+rm "$r"/var/cache/apt/archives/linux-image-edge-rockchip64_*.deb
+in_root hwtool kernel switch vendor --dry-run | tee /tmp/switch-dry.txt
+grep -q 'rebuild the package from the dpkg database' /tmp/switch-dry.txt || fail "dry run does not show the rebuild"
+grep -q 'copy /var/cache/apt/archives/linux-u-boot-radxa-rock-4d-edge_26.11.0-trunk_arm64.deb' /tmp/switch-dry.txt \
+  || fail "dry run does not show the U-Boot copy"
 in_root hwtool kernel switch vendor --yes
 [[ "$(readlink "$r/boot/Image")" == vmlinuz-6.1.115-vendor-rk35xx ]] || fail "/boot/Image: $(readlink "$r/boot/Image")"
 [[ "$(readlink "$r/boot/dtb")" == dtb-6.1.115-vendor-rk35xx ]] || fail "/boot/dtb: $(readlink "$r/boot/dtb")"
@@ -119,11 +137,33 @@ ls "$r"/var/backups/hwtool/*/boot/armbianEnv.txt >/dev/null || fail "no backup o
 in_root hwtool overlays list
 in_root hwtool kernel status
 
+step "saved packages"
+ls -l "$r"/var/lib/hwtool/packages/*/
+for p in linux-image-edge-rockchip64 linux-dtb-edge-rockchip64 linux-u-boot-radxa-rock-4d-edge linux-headers-edge-rockchip64; do
+  f="$(ls "$r"/var/lib/hwtool/packages/*/"${p}"_26.11.0-trunk_arm64.deb)" || fail "$p was not saved"
+  dpkg-deb --info "$f" | grep -q "Package: $p" || fail "$f is not a valid package"
+done
+dpkg-deb --contents "$r"/var/lib/hwtool/packages/*/linux-image-edge-rockchip64_*.deb | grep -q 'boot/vmlinuz-7.3.4-edge-rockchip64' \
+  || fail "the rebuilt kernel package has no kernel"
+
+step "the repository stops offering the edge U-Boot package"
+rm "$r"/srv/repo/linux-u-boot-radxa-rock-4d-edge_*.deb
+reindex "$r/srv/repo"
+in_root apt-get update -q
+in_root apt-cache policy linux-u-boot-radxa-rock-4d-edge
+
 step "revert to edge"
+in_root hwtool kernel revert --dry-run | tee /tmp/revert-dry.txt
+grep -q 'apt no longer offers this version; installing linux-u-boot-radxa-rock-4d-edge' /tmp/revert-dry.txt \
+  || fail "revert does not use the saved U-Boot package"
 in_root hwtool kernel revert --yes
 [[ "$(readlink "$r/boot/Image")" == vmlinuz-7.3.4-edge-rockchip64 ]] || fail "/boot/Image after revert: $(readlink "$r/boot/Image")"
 grep -qx 'overlay_prefix=rockchip-rk3576' "$r/boot/armbianEnv.txt" || fail "overlay_prefix not restored"
 in_root dpkg-query -W linux-image-edge-rockchip64 linux-u-boot-radxa-rock-4d-edge linux-headers-edge-rockchip64
+[[ "$(in_root dpkg-query -W -f '${Version}' linux-u-boot-radxa-rock-4d-edge)" == 26.11.0-trunk ]] \
+  || fail "edge U-Boot was not reinstalled"
+[[ -f "$r/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip.bin" ]] || fail "edge U-Boot files missing"
+[[ "$(ls "$r/var/lib/hwtool/packages")" != "" ]] || fail "the revert saved nothing"
 if in_root dpkg-query -W -f '${db:Status-Abbrev}\n' linux-image-vendor-rk35xx 2>/dev/null | grep -q '^ii'; then
   fail "vendor kernel still installed after revert"
 fi
