@@ -18,7 +18,8 @@ r="$(mktemp -d /tmp/hwtool-chroot.XXXXXX)"
 mirror="${MIRROR:-http://ports.ubuntu.com/ubuntu-ports}"
 
 cleanup() {
-  for m in sys/firmware dev/pts dev proc sys; do
+  swapoff "$r/swap.img" 2>/dev/null || true
+  for m in sys/firmware dev/pts dev proc sys ""; do
     umount "$r/$m" 2>/dev/null || true
   done
 }
@@ -43,6 +44,9 @@ fail() {
 
 step "debootstrap noble"
 debootstrap --variant=minbase --arch=arm64 noble "$r" "$mirror" >/tmp/debootstrap.log
+# The chroot as a mount of its own, so /proc/self/mountinfo inside it has
+# a / entry (hwtool swap reads the root file system's type there).
+mount --bind "$r" "$r"
 mount -t proc proc "$r/proc"
 mount -t sysfs sys "$r/sys"
 mount --bind /dev "$r/dev"
@@ -346,6 +350,36 @@ if [[ $npu_fake == yes ]]; then
     fail "install-charsiu did not refuse without an NPU"
   fi
 fi
+
+step "swap file: make, resize, swappiness, off"
+# What cloud-init 25.1 writes at the first boot, before the file exists.
+printf '/swap.img\tnone\tswap\tsw\t0\t0\n' >>"$r/etc/fstab"
+in_root hwtool swap show
+in_root hwtool swap set 64M --dry-run
+in_root hwtool swap set 64M --yes
+in_root grep -q '^/swap.img ' /proc/swaps || fail "/swap.img is not in use"
+test "$(stat -c %a "$r/swap.img")" = 600 || fail "/swap.img is not mode 600"
+test "$(stat -c %s "$r/swap.img")" = $((64 << 20)) || fail "/swap.img is not 64 MiB"
+test "$(grep -c swap.img "$r/etc/fstab")" = 1 || fail "fstab has not exactly one swap.img line"
+grep -qP '^/swap.img\tnone\tswap\tsw,comment=cloudconfig\t0\t0$' "$r/etc/fstab" \
+  || fail "fstab line is not in cloud-init's format"
+in_root hwtool swap set 128M --yes
+test "$(stat -c %s "$r/swap.img")" = $((128 << 20)) || fail "/swap.img was not resized"
+test "$(grep -c swap.img "$r/etc/fstab")" = 1 || fail "resize duplicated the fstab line"
+in_root hwtool swap show | tee /tmp/swap.txt
+grep -q '^Active swap: /swap.img (file)' /tmp/swap.txt || fail "show does not list the active file"
+if in_root hwtool swap set 100T --force --yes 2>/tmp/swap-big.txt; then fail "100T accepted"; fi
+grep -q 'does not fit' /tmp/swap-big.txt || fail "100T refusal unclear"
+old_swappiness="$(cat /proc/sys/vm/swappiness)"
+in_root hwtool swap swappiness 20 --yes
+test "$(cat /proc/sys/vm/swappiness)" = 20 || fail "swappiness not set"
+grep -qx 'vm.swappiness = 20' "$r/etc/sysctl.d/60-hwtool-swap.conf" || fail "swappiness not kept"
+echo "$old_swappiness" >/proc/sys/vm/swappiness
+in_root hwtool swap off --yes
+test ! -e "$r/swap.img" || fail "/swap.img still there"
+! grep -q swap.img "$r/etc/fstab" || fail "fstab still names /swap.img"
+! in_root grep -q '^/swap.img ' /proc/swaps || fail "/swap.img still in use"
+ls "$r/var/backups/hwtool/"*/etc/fstab >/dev/null || fail "no fstab backup"
 
 step "boot status"
 in_root hwtool boot status

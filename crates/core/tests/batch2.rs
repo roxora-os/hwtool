@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use hwtool_core::exec::RecordingExecutor;
-use hwtool_core::{bootinfo, cpu, interfaces, leds, thermal, wifi};
+use hwtool_core::{bootinfo, cpu, interfaces, leds, swap, thermal, wifi};
 
 // ---- interfaces --------------------------------------------------------------
 
@@ -459,4 +459,165 @@ fn wifi_country() {
             .unwrap()
             .aic8800_follows_country
     );
+}
+
+// ---- swap -------------------------------------------------------------------------------
+
+/// The state after cloud-init 25.1's first boot: /swap.img in use, its fstab
+/// line without comment=cloudconfig, and zram from armbian-zram-config.
+fn with_swap(f: &Fake, used_kib: u64, available_kib: u64) {
+    f.write(
+        "/proc/meminfo",
+        &format!("MemTotal:        3956800 kB\nMemFree:  100000 kB\nMemAvailable:    {available_kib} kB\n"),
+    );
+    f.write(
+        "/proc/swaps",
+        &format!("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/zram0                              partition\t1978396\t\t0\t\t5\n/swap.img                               file\t\t1048572\t\t{used_kib}\t\t-2\n"),
+    );
+    f.sized("/swap.img", 1 << 30);
+    f.write(
+        "/etc/fstab",
+        "UUID=db9a14c3 / ext4 defaults,commit=120,errors=remount-ro 0 1\ntmpfs /tmp tmpfs defaults,nosuid 0 0\n/swap.img\tnone\tswap\tsw\t0\t0\n",
+    );
+    f.write(
+        "/lib/systemd/system/armbian-zram-config.service",
+        "[Unit]\n",
+    );
+    f.write("/proc/sys/vm/swappiness", "60\n");
+    f.mounts("/dev/mmcblk1p1 / ext4 rw,relatime 0 0\nproc /proc proc rw 0 0\n");
+}
+
+/// A 32 GiB root file system with 20 GiB free.
+const SPACE: (u64, u64) = (32 << 30, 20 << 30);
+
+#[test]
+fn swap_show_resize_off() {
+    let f = rock4d();
+    with_swap(&f, 2048, 3_000_000);
+    let st = swap::status(&f.root()).unwrap();
+    assert_eq!(st.file, "/swap.img");
+    assert_eq!(st.file_bytes, Some(1 << 30));
+    assert_eq!(
+        st.fstab_line.as_deref(),
+        Some("/swap.img\tnone\tswap\tsw\t0\t0")
+    );
+    assert!(st.zram && st.zram_service);
+    assert_eq!(st.swappiness, Some(60));
+    assert_eq!(st.active.len(), 2);
+
+    let p = swap::set_plan_with_space(&f.root(), "64M", false, SPACE).unwrap();
+    let text = p.render();
+    for want in [
+        "$ swapoff /swap.img",
+        "$ rm -f /swap.img",
+        "$ install -m 0600 /dev/null /swap.img",
+        "$ fallocate -l 64M /swap.img",
+        "$ mkswap /swap.img",
+        "$ swapon /swap.img",
+        "/swap.img\tnone\tswap\tsw,comment=cloudconfig\t0\t0",
+    ] {
+        assert!(text.contains(want), "{want}\n{text}");
+    }
+    assert!(p
+        .cleanup
+        .iter()
+        .any(|c| c.step.description.contains("unfinished")));
+    let mut ex = RecordingExecutor::default();
+    p.execute(&f.root(), &mut ex, "S").unwrap();
+    let fstab = f.read("/etc/fstab");
+    assert_eq!(fstab.matches("/swap.img").count(), 1, "{fstab}");
+    assert!(fstab.contains("sw,comment=cloudconfig"));
+    assert!(fstab.starts_with("UUID=db9a14c3 / ext4"));
+    assert!(f.p("/var/backups/hwtool/S/etc/fstab").exists());
+
+    // A failed mkswap removes the unfinished file and the fstab line.
+    let mut ex = RecordingExecutor::default();
+    ex.failing.push("mkswap /swap.img".into());
+    let p = swap::set_plan_with_space(&f.root(), "128M", false, SPACE).unwrap();
+    assert!(p.execute(&f.root(), &mut ex, "T").is_err());
+    assert!(ex.ran.iter().any(|r| r.join(" ") == "rm -f /swap.img"));
+    assert!(!f.read("/etc/fstab").contains("/swap.img"));
+
+    let f = rock4d();
+    with_swap(&f, 2048, 3_000_000);
+    let p = swap::off_plan(&f.root()).unwrap();
+    let text = p.render();
+    assert!(
+        text.contains("$ swapoff /swap.img") && text.contains("$ rm -f /swap.img"),
+        "{text}"
+    );
+    assert!(text.contains("zram swap"), "{text}");
+    p.execute(&f.root(), &mut RecordingExecutor::default(), "O")
+        .unwrap();
+    assert!(!f.read("/etc/fstab").contains("swap"));
+    assert!(f.read("/etc/fstab").contains("tmpfs /tmp"));
+}
+
+#[test]
+fn swap_refusals() {
+    let f = rock4d();
+    // 900 MiB swapped out, 600 MiB of memory available: swapoff would not fit.
+    with_swap(&f, 900 * 1024, 600 * 1024);
+    let err = swap::set_plan_with_space(&f.root(), "2G", false, SPACE)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cannot be switched off now"), "{err}");
+    let err = swap::off_plan(&f.root()).unwrap_err().to_string();
+    assert!(err.contains("cannot be switched off now"), "{err}");
+
+    let f = rock4d();
+    with_swap(&f, 0, 3_000_000);
+    let err = swap::set_plan_with_space(&f.root(), "100T", true, SPACE)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not fit"), "{err}");
+    // More than twice the 3.8 GiB of memory.
+    let err = swap::set_plan_with_space(&f.root(), "9G", false, SPACE)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("more than twice the memory")
+            || err.contains("does not fit")
+            || err.contains("quarter"),
+        "{err}"
+    );
+    assert!(swap::set_plan_with_space(&f.root(), "8M", false, SPACE).is_err());
+    f.mounts("/dev/mmcblk1p1 / btrfs rw 0 0\n");
+    let err = swap::set_plan_with_space(&f.root(), "64M", false, SPACE)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("btrfs"), "{err}");
+
+    // swappiness
+    assert!(swap::swappiness_plan(&f.root(), 201).is_err());
+    let p = swap::swappiness_plan(&f.root(), 10).unwrap();
+    p.execute(&f.root(), &mut RecordingExecutor::default(), "W")
+        .unwrap();
+    assert_eq!(f.read("/proc/sys/vm/swappiness"), "10");
+    assert_eq!(swap::status(&f.root()).unwrap().swappiness_saved, Some(10));
+}
+
+#[test]
+fn swap_new_file_without_fstab_line() {
+    let f = rock4d();
+    f.write(
+        "/proc/meminfo",
+        "MemTotal: 3956800 kB\nMemAvailable: 3000000 kB\n",
+    );
+    f.write("/proc/swaps", "Filename Type Size Used Priority\n");
+    f.write("/etc/fstab", "UUID=x / ext4 defaults 0 1\n");
+    let p = swap::set_plan_with_space(&f.root(), "64M", false, SPACE).unwrap();
+    let text = p.render();
+    assert!(
+        !text.contains("swapoff") && !text.contains("Delete the old"),
+        "{text}"
+    );
+    p.execute(&f.root(), &mut RecordingExecutor::default(), "N")
+        .unwrap();
+    assert_eq!(
+        f.read("/etc/fstab"),
+        "UUID=x / ext4 defaults 0 1\n/swap.img\tnone\tswap\tsw,comment=cloudconfig\t0\t0\n"
+    );
+    let p = swap::off_plan(&f.root()).unwrap();
+    assert!(p.render().contains("Remove /swap.img from /etc/fstab"));
 }

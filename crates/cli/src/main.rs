@@ -12,7 +12,8 @@ use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
 use hwtool_core::{
-    bootenv, bootinfo, cpu, interfaces, kernel, leds, migrate, npu, overlays, thermal, wifi, Root,
+    bootenv, bootinfo, cpu, interfaces, kernel, leds, migrate, npu, overlays, swap, thermal, wifi,
+    Root,
 };
 
 // Output never panics: when the terminal or the pipe to the GTK app is
@@ -91,6 +92,9 @@ enum Command {
     /// Wi-Fi settings.
     #[command(subcommand)]
     Wifi(WifiCmd),
+    /// The swap file (/swap.img, made by cloud-init at the first boot).
+    #[command(subcommand)]
+    Swap(SwapCmd),
     /// Apply hwtool's saved CPU and LED settings (run at boot by hwtool-boot.service).
     #[command(hide = true)]
     Apply,
@@ -144,6 +148,33 @@ enum WifiCmd {
         /// of its own permissive rules (custregd=0; not tried on hardware).
         #[arg(long)]
         aic8800_follow_country: bool,
+        #[command(flatten)]
+        change: Change,
+    },
+}
+
+#[derive(Subcommand)]
+enum SwapCmd {
+    /// Show active swap, the swap file, its fstab line, memory and zram.
+    Show,
+    /// Make or resize the swap file, for example 2G or 512M.
+    Set {
+        size: String,
+        /// Allow more than twice the memory, or leaving less than a quarter
+        /// of the root file system free.
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Stop swapping to the file, delete it and its fstab line.
+    Off {
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Set vm.swappiness (0 to 200), now and at every boot.
+    Swappiness {
+        value: u32,
         #[command(flatten)]
         change: Change,
     },
@@ -740,6 +771,31 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             let p = wifi::set_plan(&root, &mut exec, c, *aic8800_follow_country)?;
             apply(cli, &root, &mut exec, p, change.clone())
         }
+        Command::Swap(SwapCmd::Show) => {
+            let st = swap::status(&root)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                print_swap(&st);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Swap(SwapCmd::Set {
+            size,
+            force,
+            change,
+        }) => {
+            let p = swap::set_plan(&root, size, *force)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Swap(SwapCmd::Off { change }) => {
+            let p = swap::off_plan(&root)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Swap(SwapCmd::Swappiness { value, change }) => {
+            let p = swap::swappiness_plan(&root, *value)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
         Command::Boot(BootCmd::Migrate {
             target,
             write_spi,
@@ -1033,6 +1089,54 @@ fn print_interfaces(st: &interfaces::Status) {
         for (pin, what) in &st.busy {
             outln!("  {pin:>2}  {what}");
         }
+    }
+}
+
+fn print_swap(st: &swap::Status) {
+    outln!(
+        "Memory: {} ({} available)",
+        human(st.mem_total_bytes),
+        human(st.mem_available_bytes)
+    );
+    if st.active.is_empty() {
+        outln!("Active swap: none");
+    }
+    for a in &st.active {
+        outln!(
+            "Active swap: {} ({}) {}, {} used, priority {}",
+            a.name,
+            a.kind,
+            human(a.size_bytes),
+            human(a.used_bytes),
+            a.priority
+        );
+    }
+    outln!(
+        "Swap file: {} {}",
+        st.file,
+        st.file_bytes
+            .map(human)
+            .unwrap_or_else(|| "(does not exist)".into())
+    );
+    outln!(
+        "fstab: {}",
+        st.fstab_line.as_deref().unwrap_or("no line for it")
+    );
+    outln!(
+        "zram: {}",
+        match (st.zram, st.zram_service) {
+            (true, _) => "in use (armbian-zram-config)",
+            (false, true) => "not in use (armbian-zram-config is installed)",
+            _ => "not in use",
+        }
+    );
+    if let Some(s) = st.swappiness {
+        outln!(
+            "vm.swappiness: {s}{}",
+            st.swappiness_saved
+                .map(|v| format!(" ({v} set by hwtool)"))
+                .unwrap_or_default()
+        );
     }
 }
 
