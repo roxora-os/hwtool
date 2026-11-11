@@ -6,13 +6,20 @@
 //! `pkexec /usr/bin/hwtool ... --yes` (polkit action
 //! io.github.roxora_os.hwtool.run).
 //!
-//! Environment, for tests: HWTOOL_CLI (path of the hwtool binary),
-//! HWTOOL_ROOT (passed as --root), HWTOOL_GTK_NO_PKEXEC=1 (run hwtool
-//! directly), HWTOOL_GTK_PAGE (overlays, kernel or boot) and
+//! The confirmation shows a dry run made as the user; the root run gets its
+//! fingerprint (--expect-plan) and refuses if its own plan differs. While a
+//! change runs the window cannot be closed and offers no other action.
+//!
+//! Environment: HWTOOL_GTK_PAGE (overlays, kernel or boot),
 //! HWTOOL_GTK_EXIT_AFTER_MS (quit after that many milliseconds) and
 //! HWTOOL_GTK_SCREENSHOT (save the window as PNG to that path, then quit).
+//! Built with the `test-hooks` feature only, for CI: HWTOOL_CLI (path of
+//! the hwtool binary), HWTOOL_ROOT (passed as --root),
+//! HWTOOL_GTK_NO_PKEXEC=1 (run hwtool directly) and HWTOOL_GTK_DEMO_BUSY=1
+//! (show the window as it looks while a change runs). Release packages are built
+//! without it, so the app always runs /usr/bin/hwtool through pkexec.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::process::Command;
 use std::rc::Rc;
@@ -26,6 +33,9 @@ const APP_ID: &str = "io.github.roxora_os.HwTool";
 
 struct Ctx {
     window: gtk::ApplicationWindow,
+    stack: gtk::Stack,
+    banner: gtk::Label,
+    busy: Cell<bool>,
     cli: String,
     root: Option<String>,
     pkexec: bool,
@@ -36,7 +46,67 @@ struct Ctx {
 
 type Shared = Rc<Ctx>;
 
+/// One hwtool command: its words, then names passed after `--`.
+#[derive(Clone)]
+struct Cmd {
+    args: Vec<String>,
+    names: Vec<String>,
+}
+
+impl Cmd {
+    fn new(args: &[&str]) -> Self {
+        Cmd {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            names: Vec::new(),
+        }
+    }
+
+    /// The command with `flags` before the names, which follow `--` so a
+    /// name can never be read as an option.
+    fn argv(&self, flags: &[String]) -> Vec<String> {
+        let mut v = self.args.clone();
+        v.extend(flags.iter().cloned());
+        if !self.names.is_empty() {
+            v.push("--".into());
+            v.extend(self.names.iter().cloned());
+        }
+        v
+    }
+}
+
+fn euid_is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(2).map(|e| e == "0"))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "test-hooks")]
+fn hooks() -> (String, Option<String>, bool) {
+    (
+        std::env::var("HWTOOL_CLI").unwrap_or_else(|_| "/usr/bin/hwtool".into()),
+        std::env::var("HWTOOL_ROOT").ok().filter(|s| !s.is_empty()),
+        std::env::var("HWTOOL_GTK_NO_PKEXEC").as_deref() != Ok("1"),
+    )
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn hooks() -> (String, Option<String>, bool) {
+    ("/usr/bin/hwtool".into(), None, true)
+}
+
 fn main() -> glib::ExitCode {
+    if euid_is_root() {
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"hwtool-gtk: do not run this app as root; it asks for the administrator password when it changes something\n",
+        );
+        return glib::ExitCode::FAILURE;
+    }
     let app = gtk::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run_with_args::<&str>(&[])
@@ -65,14 +135,40 @@ fn build_ui(app: &gtk::Application) {
     header.set_title_widget(Some(&switcher));
     window.set_titlebar(Some(&header));
 
+    let (cli, root, pkexec) = hooks();
+    let banner = gtk::Label::new(None);
+    banner.set_visible(false);
+    banner.set_wrap(true);
+    banner.set_margin_top(12);
+    banner.set_margin_start(18);
+    banner.set_margin_end(18);
     let ctx: Shared = Rc::new(Ctx {
         window: window.clone(),
-        cli: std::env::var("HWTOOL_CLI").unwrap_or_else(|_| "/usr/bin/hwtool".into()),
-        root: std::env::var("HWTOOL_ROOT").ok().filter(|s| !s.is_empty()),
-        pkexec: std::env::var("HWTOOL_GTK_NO_PKEXEC").as_deref() != Ok("1"),
+        stack: stack.clone(),
+        banner: banner.clone(),
+        busy: Cell::new(false),
+        cli,
+        root,
+        pkexec,
         overlays: page_box(),
         kernel: page_box(),
         boot: page_box(),
+    });
+    // While a change runs the window stays open: closing it would leave the
+    // change without anyone to show its result to.
+    let ctx_close = ctx.clone();
+    window.connect_close_request(move |_| {
+        if ctx_close.busy.get() {
+            message(
+                &ctx_close,
+                "A change is running",
+                "Wait until it has finished. Closing the window now would not stop it, \
+                 and you would not see whether it worked.",
+            );
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
     });
     for (name, title, page) in [
         ("overlays", "Overlays", &ctx.overlays),
@@ -86,8 +182,15 @@ fn build_ui(app: &gtk::Application) {
             .build();
         stack.add_titled(&scroll, Some(name), title);
     }
-    window.set_child(Some(&stack));
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    outer.append(&banner);
+    outer.append(&stack);
+    window.set_child(Some(&outer));
     refresh(&ctx);
+    #[cfg(feature = "test-hooks")]
+    if std::env::var("HWTOOL_GTK_DEMO_BUSY").as_deref() == Ok("1") {
+        set_busy(&ctx, true);
+    }
     if let Ok(p) = std::env::var("HWTOOL_GTK_PAGE") {
         stack.set_visible_child_name(&p);
     }
@@ -96,7 +199,10 @@ fn build_ui(app: &gtk::Application) {
         let app = app.clone();
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
             if let Err(e) = screenshot(&window, &path) {
-                eprintln!("hwtool-gtk: screenshot failed: {e}");
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!("hwtool-gtk: screenshot failed: {e}\n").as_bytes(),
+                );
             }
             app.quit();
         });
@@ -152,16 +258,24 @@ fn json(ctx: &Ctx, args: &[&str]) -> Result<Value, String> {
 }
 
 /// Show what `commands` would do, and run them after the user agrees.
-fn propose(ctx: &Shared, title: &str, commands: Vec<Vec<String>>) {
+fn propose(ctx: &Shared, title: &str, commands: Vec<Cmd>) {
+    if ctx.busy.get() {
+        message(ctx, "A change is running", "Wait until it has finished.");
+        return;
+    }
     let mut text = String::new();
+    let mut confirmed = Vec::new();
     for c in &commands {
         let mut a = vec!["--json".to_string()];
-        a.extend(c.iter().cloned());
-        a.push("--dry-run".into());
+        a.extend(c.argv(&["--dry-run".to_string()]));
         match run_cli(ctx, &a)
             .and_then(|o| serde_json::from_str::<Value>(&o).map_err(|e| e.to_string()))
         {
-            Ok(v) => text.push_str(v["text"].as_str().unwrap_or("")),
+            Ok(v) => {
+                text.push_str(v["text"].as_str().unwrap_or(""));
+                let fp = v["fingerprint"].as_str().unwrap_or("").to_string();
+                confirmed.push((c.clone(), fp));
+            }
             Err(e) => {
                 message(ctx, "Not possible", &e);
                 return;
@@ -170,22 +284,33 @@ fn propose(ctx: &Shared, title: &str, commands: Vec<Vec<String>>) {
         text.push('\n');
     }
     let ctx2 = ctx.clone();
-    confirm(ctx, title, &text, move || execute(&ctx2, commands.clone()));
+    confirm(ctx, title, &text, move || execute(&ctx2, confirmed.clone()));
 }
 
-fn execute(ctx: &Shared, commands: Vec<Vec<String>>) {
+fn set_busy(ctx: &Ctx, busy: bool) {
+    ctx.busy.set(busy);
+    ctx.stack.set_sensitive(!busy);
+    ctx.banner.set_visible(busy);
+    if busy {
+        ctx.banner.set_markup(
+            "<b>A change is running. Do not switch the board off and do not close this window.</b>",
+        );
+    }
+}
+
+fn execute(ctx: &Shared, commands: Vec<(Cmd, String)>) {
     let ctx = ctx.clone();
+    set_busy(&ctx, true);
     glib::spawn_future_local(async move {
         let mut log = String::new();
         let mut ok = true;
-        for c in commands {
+        for (c, fp) in commands {
             let mut argv: Vec<String> = Vec::new();
             if ctx.pkexec {
                 argv.push("pkexec".into());
             }
             argv.extend(base_args(&ctx));
-            argv.extend(c);
-            argv.push("--yes".into());
+            argv.extend(c.argv(&["--yes".to_string(), "--expect-plan".to_string(), fp]));
             let os: Vec<&OsStr> = argv.iter().map(OsStr::new).collect();
             let proc = match gio::Subprocess::newv(
                 &os,
@@ -213,6 +338,7 @@ fn execute(ctx: &Shared, commands: Vec<Vec<String>>) {
                 }
             }
         }
+        set_busy(&ctx, false);
         refresh(&ctx);
         message(&ctx, if ok { "Done" } else { "Failed" }, &log);
     });
@@ -378,10 +504,16 @@ fn overlays_page(ctx: &Shared) {
         }
         let mut cmds = Vec::new();
         if !on.is_empty() {
-            cmds.push([vec!["overlays".into(), "enable".into()], on].concat());
+            cmds.push(Cmd {
+                names: on,
+                ..Cmd::new(&["overlays", "enable"])
+            });
         }
         if !off.is_empty() {
-            cmds.push([vec!["overlays".into(), "disable".into()], off].concat());
+            cmds.push(Cmd {
+                names: off,
+                ..Cmd::new(&["overlays", "disable"])
+            });
         }
         if cmds.is_empty() {
             message(
@@ -477,10 +609,11 @@ fn kernel_page(ctx: &Shared) {
     let ctx2 = ctx.clone();
     switch.connect_clicked(move |_| {
         if let Some(br) = others.get(dd.selected() as usize) {
-            let mut c = vec!["kernel".to_string(), "switch".into(), br.clone()];
+            let mut c = Cmd::new(&["kernel", "switch"]);
             if keep.is_active() {
-                c.push("--keep-old".into());
+                c.args.push("--keep-old".into());
             }
+            c.names.push(br.clone());
             propose(&ctx2, &format!("Switch to the {br} kernel"), vec![c]);
         }
     });
@@ -502,7 +635,7 @@ fn kernel_page(ctx: &Shared) {
             propose(
                 &ctx2,
                 "Revert the kernel branch",
-                vec![vec!["kernel".into(), "revert".into()]],
+                vec![Cmd::new(&["kernel", "revert"])],
             );
         });
         b.append(&revert);
@@ -615,7 +748,14 @@ fn boot_page(ctx: &Shared) {
             if booted.is_active() {
                 c.push("--allow-booted-device".into());
             }
-            propose(&ctx2, "Write the bootloader", vec![c]);
+            propose(
+                &ctx2,
+                "Write the bootloader",
+                vec![Cmd {
+                    args: c,
+                    names: vec![],
+                }],
+            );
         }
     });
 
@@ -655,7 +795,10 @@ fn boot_page(ctx: &Shared) {
             propose(
                 &ctx2,
                 &format!("Erase {t} and copy the system to it"),
-                vec![c],
+                vec![Cmd {
+                    args: c,
+                    names: vec![],
+                }],
             );
         }
     });

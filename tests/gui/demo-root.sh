@@ -54,7 +54,12 @@ END
 truncate -s 9561600 "$r/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip.bin"
 truncate -s 1598976 "$r/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip-spi.bin"
 
-echo "/dev/mmcblk1p1 / ext4 rw,relatime 0 0" >"$r/proc/self/mounts"
+echo "22 1 179:97 / / rw,relatime - ext4 /dev/mmcblk1p1 rw" >"$r/proc/self/mountinfo"
+mkdir -p "$r/sys/dev/block"
+ln -sfn ../../block/mmcblk1/mmcblk1p1 "$r/sys/dev/block/179:97"
+ln -sfn ../../block/mmcblk1 "$r/sys/dev/block/179:96"
+ln -sfn ../../block/mmcblk0 "$r/sys/dev/block/179:0"
+ln -sfn ../../block/nvme0n1 "$r/sys/dev/block/259:0"
 echo 62333952 >"$r/sys/block/mmcblk1/size"
 echo SD >"$r/sys/block/mmcblk1/device/type"
 echo 1 >"$r/sys/block/mmcblk1/mmcblk1p1/partition"

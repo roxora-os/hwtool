@@ -11,6 +11,11 @@ repository.workspace = true
 name = "hwtool-gtk"
 path = "src/main.rs"
 
+[features]
+# CI only: lets HWTOOL_CLI, HWTOOL_ROOT and HWTOOL_GTK_NO_PKEXEC change what
+# the app runs. Release packages are built without it.
+test-hooks = []
+
 [dependencies]
 serde_json.workspace = true
 # GNOME 46 is what Ubuntu 24.04 ships (GTK 4.14).
