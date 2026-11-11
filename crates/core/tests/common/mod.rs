@@ -78,6 +78,7 @@ impl Fake {
         if let Some(t) = mmc_type {
             self.write(&format!("{base}/device/type"), &format!("{t}\n"));
         }
+        self.blockdev(name, &format!("../../block/{name}"));
         for (i, (start, size)) in parts.iter().enumerate() {
             let pn = if name.ends_with(|c: char| c.is_ascii_digit()) {
                 format!("{name}p{}", i + 1)
@@ -87,11 +88,48 @@ impl Fake {
             self.write(&format!("{base}/{pn}/partition"), &format!("{}\n", i + 1));
             self.write(&format!("{base}/{pn}/start"), &format!("{start}\n"));
             self.write(&format!("{base}/{pn}/size"), &format!("{size}\n"));
+            self.blockdev(&pn, &format!("../../block/{name}/{pn}"));
         }
     }
 
+    /// /sys/dev/block/<major:minor> -> the device, as the kernel links it.
+    fn blockdev(&self, name: &str, target: &str) {
+        self.link(&format!("/sys/dev/block/{}", majmin(name)), target);
+    }
+
+    /// A device-mapper device (LUKS, LVM) on top of `slaves`.
+    pub fn dm(&self, name: &str, slaves: &[&str]) {
+        for sl in slaves {
+            std::fs::create_dir_all(self.p(&format!("/sys/block/{name}/slaves/{sl}"))).unwrap();
+        }
+        self.write(&format!("/sys/block/{name}/size"), "1000\n");
+        self.blockdev(name, &format!("../../devices/virtual/block/{name}"));
+    }
+
+    /// Mounts as "device mountpoint fstype" lines, written as
+    /// /proc/self/mountinfo with the devices' major:minor numbers.
     pub fn mounts(&self, text: &str) {
-        self.write("/proc/self/mounts", text);
+        let mut out = String::new();
+        for (i, l) in text.lines().enumerate() {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let name = f[0].rsplit('/').next().unwrap();
+            let mm = if f[0].starts_with("/dev/") {
+                majmin(name)
+            } else {
+                "0:99".into()
+            };
+            out.push_str(&format!(
+                "{} 1 {mm} / {} rw,relatime - {} {} rw\n",
+                20 + i,
+                f[1],
+                f[2],
+                f[0]
+            ));
+        }
+        self.write("/proc/self/mountinfo", &out);
     }
 
     pub fn programs(&self, names: &[&str]) {
@@ -99,6 +137,15 @@ impl Fake {
             self.write(&format!("/usr/sbin/{n}"), "#!/bin/sh\n");
         }
     }
+}
+
+/// A stable made-up major:minor number for a device name.
+pub fn majmin(name: &str) -> String {
+    let mut h: u32 = 2166136261;
+    for b in name.bytes() {
+        h = (h ^ u32::from(b)).wrapping_mul(16777619);
+    }
+    format!("259:{}", h % 1_000_000)
 }
 
 fn fixture(name: &str) -> String {

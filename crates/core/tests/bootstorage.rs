@@ -265,3 +265,255 @@ fn migrate_needs_tools() {
         .to_string();
     assert!(err.contains("missing programs: parted (parted)"), "{err}");
 }
+
+// ---- which disks the running system uses (M1) ----------------------------
+
+fn holds_root(f: &Fake) -> Vec<String> {
+    hwtool_core::storage::disks(&f.root())
+        .into_iter()
+        .filter(|d| d.holds_root)
+        .map(|d| d.name)
+        .collect()
+}
+
+#[test]
+fn root_on_device_mapper_protects_the_disks_below() {
+    let f = rock4d();
+    f.disk(
+        "nvme0n1",
+        None,
+        500_118_192,
+        &[(2048, 1000), (4096, 400_000_000)],
+    );
+    f.dm("dm-0", &["nvme0n1p2"]);
+    f.mounts("/dev/mapper/root / ext4\n");
+    // The kernel shows /dev/mapper/root in mountinfo; the number is dm-0's.
+    let mi = f
+        .read("/proc/self/mountinfo")
+        .replace(&majmin("root"), &majmin("dm-0"));
+    f.write("/proc/self/mountinfo", &mi);
+    assert_eq!(holds_root(&f), vec!["nvme0n1"]);
+    let sys = hwtool_core::storage::system(&f.root()).unwrap();
+    assert_eq!(sys.root_device, "dm-0");
+}
+
+#[test]
+fn ubootpart_and_boot_mount_are_protected_too() {
+    let f = rock4d();
+    f.disk("nvme0n1", None, 500_118_192, &[(2048, 400_000_000)]);
+    f.mounts("/dev/nvme0n1p1 / ext4\n");
+    // U-Boot loaded boot.scr from the SD card.
+    f.write("/proc/cmdline", "root=UUID=x ubootpart=1234-01 rootwait\n");
+    f.link("/dev/disk/by-partuuid/1234-01", "../../mmcblk1p1");
+    assert_eq!(holds_root(&f), vec!["mmcblk1", "nvme0n1"]);
+    let err = bootloader::write_plan(&f.root(), &Target::Disk("/dev/mmcblk1".into()), false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--allow-booted-device"), "{err}");
+    // A separate /boot counts as well.
+    f.write("/proc/cmdline", "root=UUID=x rootwait\n");
+    f.mounts("/dev/nvme0n1p1 / ext4\n/dev/mmcblk1p1 /boot ext4\n");
+    assert_eq!(holds_root(&f), vec!["mmcblk1", "nvme0n1"]);
+}
+
+#[test]
+fn unknown_root_fails_closed() {
+    let f = rock4d();
+    f.disk("mmcblk0", Some("MMC"), 61_071_360, &[(32768, 61_000_000)]);
+    f.disk("nvme0n1", None, 500_118_192, &[]);
+    // / from a device sysfs does not know (or no mountinfo at all).
+    f.mounts("/dev/root / ext4\n");
+    assert!(holds_root(&f).is_empty());
+    let err =
+        bootloader::write_plan(&f.root(), &Target::Disk("/dev/mmcblk0".into()), false).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("cannot tell which disk"),
+        "{err:#}"
+    );
+    let mut ex = migrate_ready(&f);
+    let err = migrate::plan(&f.root(), &mut ex, "/dev/nvme0n1", false).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("cannot find the block device"),
+        "{err:#}"
+    );
+}
+
+// ---- the U-Boot package's writer (M4, M9) --------------------------------
+
+fn with_writer(body: &str) -> Fake {
+    let f = rock4d();
+    f.disk("mmcblk0", Some("MMC"), 61_071_360, &[(32768, 61_000_000)]);
+    f.write(
+        "/usr/lib/u-boot/platform_install.sh",
+        &format!("DIR=/usr/lib/linux-u-boot-edge-radxa-rock-4d\nwrite_uboot_platform ()\n{{\n{body}\n}}\n"),
+    );
+    f
+}
+
+fn emmc_err(f: &Fake) -> String {
+    format!(
+        "{:#}",
+        bootloader::write_plan(&f.root(), &Target::Disk("/dev/mmcblk0".into()), false).unwrap_err()
+    )
+}
+
+#[test]
+fn writer_lines_must_parse_completely() {
+    // Generic rockchip64 layout: idbloader at sector 64, u-boot.itb at 8 MiB.
+    let f = with_writer(
+        "    dd if=$1/idbloader.img of=$2 seek=64 conv=notrunc status=none\n    dd if=$1/u-boot.itb of=$2 seek=16384 conv=notrunc status=none",
+    );
+    let d = "/usr/lib/linux-u-boot-edge-radxa-rock-4d";
+    f.sized(&format!("{d}/idbloader.img"), 200_000);
+    f.sized(&format!("{d}/u-boot.itb"), 1_000_000);
+    let p =
+        bootloader::write_plan_with(&f.root(), &Target::Disk("/dev/mmcblk0".into()), false, None)
+            .unwrap();
+    let w: Vec<(u64, u64)> = p.writes.iter().map(|w| (w.offset, w.len)).collect();
+    assert_eq!(w, vec![(32768, 200_000), (8 << 20, 1_000_000)]);
+    // oflag=seek_bytes, count and a size suffix.
+    let f = with_writer("    dd if=$1/u-boot-rockchip.bin of=$2 bs=1M count=2 seek=32768 oflag=seek_bytes conv=notrunc,fsync");
+    let p =
+        bootloader::write_plan_with(&f.root(), &Target::Disk("/dev/mmcblk0".into()), false, None)
+            .unwrap();
+    assert_eq!((p.writes[0].offset, p.writes[0].len), (32768, 2 << 20));
+    // Past the first partition (16 MiB): refused.
+    let f = with_writer("    dd if=$1/u-boot-rockchip.bin of=$2 bs=1M seek=10");
+    assert!(emmc_err(&f).contains("past the start of the first partition"));
+    // Things hwtool cannot fully read: refused.
+    for bad in [
+        "    dd if=$1/u-boot-rockchip.bin of=$2 bs=2x512",
+        "    dd if=$1/u-boot-rockchip.bin of=$2 conv=excl",
+        "    dd if=$1/u-boot-rockchip.bin of=$2 oflag=append",
+        "    dd if=$1/u-boot-rockchip.bin of=$2 iflag=nonblock",
+        "    dd $1/u-boot-rockchip.bin $2",
+    ] {
+        let f = with_writer(bad);
+        assert!(
+            emmc_err(&f).contains("is not supported") || emmc_err(&f).contains("cannot read"),
+            "{bad}: {}",
+            emmc_err(&f)
+        );
+    }
+}
+
+#[test]
+fn writer_must_write_only_the_requested_device() {
+    let f = with_writer("    dd if=$1/u-boot-rockchip.bin of=/dev/mmcblk1 bs=32k seek=1");
+    assert!(
+        emmc_err(&f).contains("writes to /dev/mmcblk1, not to /dev/mmcblk0"),
+        "{}",
+        emmc_err(&f)
+    );
+}
+
+#[test]
+fn writer_side_effects_are_refused_and_never_happen() {
+    let marker = "/tmp/hwtool-should-not-exist";
+    let host_marker = std::path::Path::new(marker);
+    let _ = std::fs::remove_file(host_marker);
+    for (body, want) in [
+        ("    blkdiscard $2", "runs blkdiscard"),
+        ("    command blkdiscard $2", "runs blkdiscard"),
+        (&*format!("    /usr/bin/touch {marker}"), "cannot show"),
+        (&*format!("    echo x > {marker}"), "cannot show"),
+        (
+            &*format!("    rm -f {marker}; dd if=$1/u-boot-rockchip.bin of=$2 bs=32k seek=1"),
+            "runs rm",
+        ),
+        ("    exec dd if=$1/u-boot-rockchip.bin of=$2", "cannot show"),
+        (
+            &*format!("    PATH=/usr/bin; touch {marker}"),
+            "cannot show",
+        ),
+    ] {
+        let f = with_writer(body);
+        let err = emmc_err(&f);
+        assert!(err.contains(want), "{body}: {err}");
+        assert!(!host_marker.exists(), "{body} wrote a file");
+    }
+}
+
+#[test]
+fn spi_plan_shows_the_device_the_writer_uses() {
+    let f = rock4d();
+    f.write("/sys/class/mtd/mtd0/name", "spi5.0\n");
+    f.write("/sys/class/mtd/mtd0/size", "16777216\n");
+    f.programs(&["flashcp"]);
+    let p = bootloader::write_plan(&f.root(), &Target::Spi, false).unwrap();
+    assert!(p.title.contains("SPI flash /dev/mtd0"), "{}", p.title);
+    // A SPI image larger than the flash is refused.
+    f.write("/sys/class/mtd/mtd0/size", "1048576\n");
+    let err = format!(
+        "{:#}",
+        bootloader::write_plan(&f.root(), &Target::Spi, false).unwrap_err()
+    );
+    assert!(err.contains("more than the 1048576 bytes"), "{err}");
+}
+
+// ---- migration order and checks (M6, L1, L2) -----------------------------
+
+#[test]
+fn migration_verifies_before_the_bootloader_and_zeroes_it_on_failure() {
+    let f = rock4d();
+    f.disk("mmcblk0", Some("MMC"), 61_071_360, &[]);
+    let mut ex = migrate_ready(&f);
+    let p = migrate::plan(&f.root(), &mut ex, "/dev/mmcblk0", false).unwrap();
+    let pos =
+        |pred: &dyn Fn(&Action) -> bool| p.steps.iter().position(|s| pred(&s.action)).unwrap();
+    let verify = pos(&|a| matches!(a, Action::VerifyTarget { .. }));
+    let uboot = pos(
+        &|a| matches!(a, Action::Shell { shows, .. } if shows.iter().any(|s| s.contains("u-boot-rockchip.bin"))),
+    );
+    assert!(verify < uboot, "verify {verify} uboot {uboot}");
+    let zero = p
+        .cleanup
+        .iter()
+        .find(|c| c.step.description.starts_with("Zero the U-Boot area"))
+        .unwrap();
+    assert_eq!((zero.from, zero.to), (uboot, uboot));
+    let text = p.render();
+    assert!(
+        text.contains(
+            "dd if=/dev/zero of=/dev/mmcblk0 bs=512 seek=64 count=18675 conv=notrunc,fsync"
+        ),
+        "{text}"
+    );
+
+    // The bootloader write fails: the U-Boot area is zeroed and the target unmounted.
+    ex.answer("blkid -s UUID -o value /dev/mmcblk0p1", "1111\n");
+    ex.answer("blkid -U 1111", "/dev/mmcblk0p1\n");
+    let m = migrate::MOUNT;
+    f.write(&format!("{m}/etc/fstab"), "UUID=x / ext4 defaults 0 1\n");
+    f.write(&format!("{m}/boot/armbianEnv.txt"), ROCK4D_ENV);
+    f.write(&format!("{m}/boot/boot.scr"), "");
+    f.write(&format!("{m}/boot/vmlinuz-{EDGE_KERNEL}"), "");
+    ex.failing
+        .push("bash -c set -e -o pipefail\nsource /usr/lib/u-boot/platform_install.sh".into());
+    ex.ran.clear();
+    let err = format!("{:#}", p.execute(&f.root(), &mut ex, "M").unwrap_err());
+    assert!(err.contains("done: Zero the U-Boot area"), "{err}");
+    assert!(err.contains("done: Unmount the target"), "{err}");
+}
+
+#[test]
+fn migration_needs_ext4_and_a_known_size() {
+    let f = rock4d();
+    f.disk("nvme0n1", None, 500_118_192, &[]);
+    f.mounts("/dev/mmcblk1p1 / btrfs\n");
+    let mut ex = migrate_ready(&f);
+    let err = format!(
+        "{:#}",
+        migrate::plan(&f.root(), &mut ex, "/dev/nvme0n1", false).unwrap_err()
+    );
+    assert!(err.contains("not ext4"), "{err}");
+    f.mounts("/dev/mmcblk1p1 / ext4\n");
+    ex.answers.remove("df -B1 --output=used /");
+    let err = format!(
+        "{:#}",
+        migrate::plan(&f.root(), &mut ex, "/dev/nvme0n1", false).unwrap_err()
+    );
+    assert!(err.contains("cannot tell how much of / is used"), "{err}");
+    ex.answer("df -B1 --output=used /", "Used\n0\n");
+    assert!(migrate::plan(&f.root(), &mut ex, "/dev/nvme0n1", false).is_err());
+}

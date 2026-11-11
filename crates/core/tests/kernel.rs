@@ -14,6 +14,10 @@ struct FakeApt<'a> {
     f: &'a Fake,
     available: Vec<(&'static str, &'static str)>,
     ran: Vec<String>,
+    /// Packages apt's simulation says it would also remove.
+    extra_removals: Vec<String>,
+    /// Commands (prefix) whose run fails.
+    failing: Vec<String>,
 }
 
 fn kver(pkg: &str) -> &'static str {
@@ -39,6 +43,10 @@ impl FakeApt<'_> {
 impl Executor for FakeApt<'_> {
     fn run(&mut self, argv: &[String]) -> Result<()> {
         self.ran.push(argv.join(" "));
+        let joined = argv.join(" ");
+        if self.failing.iter().any(|f| joined.starts_with(f.as_str())) {
+            bail!("{joined}: failed (test)");
+        }
         match argv
             .iter()
             .map(String::as_str)
@@ -126,7 +134,7 @@ impl Executor for FakeApt<'_> {
                 }
                 Ok(())
             }
-            ["apt-get", "remove", "-y", pkgs @ ..] => {
+            ["apt-get", "remove" | "purge", "-y", pkgs @ ..] => {
                 for p in pkgs {
                     let k = kver(p);
                     if p.starts_with("linux-image-") {
@@ -154,7 +162,53 @@ impl Executor for FakeApt<'_> {
             }
             return Ok(policy(versions.first().copied(), &versions));
         }
-        bail!("unexpected capture {argv:?}")
+        let a: Vec<&str> = argv.iter().map(String::as_str).collect();
+        match a.as_slice() {
+            ["apt-get", "-s", "-y", "install", specs @ ..] => {
+                let mut out = String::from("NOTE: This is only a simulation!\n");
+                let installed = dpkg::installed(&self.f.root());
+                for spec in specs {
+                    let name = spec
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .split(['=', '_'])
+                        .next()
+                        .unwrap();
+                    if name.starts_with("linux-u-boot-") {
+                        for p in installed
+                            .iter()
+                            .filter(|p| p.name.starts_with("linux-u-boot-") && p.name != name)
+                        {
+                            out.push_str(&format!("Remv {} [{}]\n", p.name, p.version));
+                        }
+                    }
+                    out.push_str(&format!("Inst {name} (1 test [arm64])\n"));
+                }
+                out.push_str(
+                    &self
+                        .extra_removals
+                        .iter()
+                        .map(|r| format!("Remv {r} [1]\n"))
+                        .collect::<String>(),
+                );
+                Ok(out)
+            }
+            ["apt-get", "-s", "-y", "remove", pkgs @ ..] => {
+                Ok(pkgs.iter().map(|p| format!("Remv {p} [1]\n")).collect())
+            }
+            ["dpkg-deb", "--field", file, "Package"] => {
+                let base = file.rsplit('/').next().unwrap();
+                if std::path::Path::new(file).exists()
+                    && std::fs::read_to_string(file).unwrap_or_default() != "broken"
+                {
+                    Ok(format!("{}\n", base.split('_').next().unwrap()))
+                } else {
+                    bail!("dpkg-deb: not a debian format archive")
+                }
+            }
+            _ => bail!("unexpected capture {argv:?}"),
+        }
     }
 }
 
@@ -186,6 +240,8 @@ fn switch_to_vendor_and_back() {
         f: &f,
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     let text = plan.render();
@@ -216,7 +272,11 @@ fn switch_to_vendor_and_back() {
 
     apt.ran.clear();
     plan.execute(&f.root(), &mut apt, "T1").unwrap();
-    let repacked = apt.ran.iter().filter(|c| c.starts_with("dpkg-deb")).count();
+    let repacked = apt
+        .ran
+        .iter()
+        .filter(|c| c.starts_with("dpkg-deb --root-owner-group"))
+        .count();
     assert_eq!(repacked, 3);
     apt.ran.retain(|c| !c.starts_with("dpkg-deb"));
     assert_eq!(
@@ -280,6 +340,8 @@ fn keep_old_keeps_kernel_packages() {
         f: &f,
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", true, None).unwrap();
     assert!(!plan.render().contains("apt-get remove"));
@@ -296,6 +358,8 @@ fn missing_packages_are_reported_before_anything_changes() {
             ("linux-dtb-vendor-rk35xx", "26.5.1"),
         ],
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let err = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None)
         .unwrap_err()
@@ -315,6 +379,8 @@ fn board_prefix_is_kept_for_cm5() {
             ("linux-u-boot-armsom-cm5-io-vendor", "26.5.1"),
         ],
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     plan.execute(&f.root(), &mut apt, "T").unwrap();
@@ -333,6 +399,8 @@ fn refuses_unsupported_and_same_branch() {
         f: &f,
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     assert!(
         kernel::switch_plan(&f.root(), &mut apt, "current", false, None)
@@ -361,6 +429,8 @@ fn missing_device_tree_stops_before_old_kernel_is_removed() {
         f: &f,
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     apt.ran.clear();
@@ -415,6 +485,8 @@ fn headers_follow_the_branch_when_installed() {
         f: &f,
         available: avail,
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     let text = plan.render();
@@ -452,6 +524,8 @@ fn revert_uses_saved_packages_when_apt_no_longer_has_them() {
             ("linux-u-boot-armsom-cm5-io-vendor", "26.5.1"),
         ],
         ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
     };
     let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     let text = plan.render();
@@ -507,4 +581,133 @@ fn revert_uses_saved_packages_when_apt_no_longer_has_them() {
     let hist = kernel::status(&f.root()).unwrap().history;
     assert!(hist[1].saved.iter().all(|s| s.file.contains(&sets[0])));
     assert!(hist[0].saved.iter().all(|s| !f.p(&s.file).exists()));
+}
+
+fn rock4d_apt(f: &Fake) -> FakeApt<'_> {
+    FakeApt {
+        f,
+        available: VENDOR_PKGS.to_vec(),
+        ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
+    }
+}
+
+#[test]
+fn failed_removal_rolls_everything_back() {
+    let f = rock4d();
+    let mut apt = rock4d_apt(&f);
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
+    apt.failing.push("apt-get remove".into());
+    apt.ran.clear();
+    let err = format!("{:#}", plan.execute(&f.root(), &mut apt, "R").unwrap_err());
+    // armbianEnv.txt is back, the vendor packages are purged, edge is reinstalled.
+    assert_eq!(f.read("/boot/armbianEnv.txt"), ROCK4D_ENV);
+    assert!(err.contains("done: Put back /boot/armbianEnv.txt"), "{err}");
+    assert!(err.contains("done: Purge the vendor packages"), "{err}");
+    assert!(err.contains("done: Reinstall the old packages"), "{err}");
+    assert!(apt.ran.iter().any(|c| c == "apt-get purge -y linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-u-boot-radxa-rock-4d-vendor"), "{:?}", apt.ran);
+    let st = kernel::status(&f.root()).unwrap();
+    assert_eq!(st.current.as_deref(), Some("edge"));
+    let names: Vec<String> = dpkg::installed(&f.root())
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(!names.iter().any(|n| n.contains("vendor")), "{names:?}");
+    assert!(
+        names.contains(&"linux-u-boot-radxa-rock-4d-edge".to_string()),
+        "{names:?}"
+    );
+    // The history says the switch did not finish, and revert knows.
+    assert_eq!(st.history.last().unwrap().state, "pending");
+    let err = kernel::revert_plan(&f.root(), &mut apt, false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("did not finish"), "{err}");
+}
+
+#[test]
+fn nothing_is_rolled_back_before_the_install_starts() {
+    let f = rock4d();
+    let mut apt = rock4d_apt(&f);
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
+    apt.failing.push("apt-get update".into());
+    apt.ran.clear();
+    let err = format!("{:#}", plan.execute(&f.root(), &mut apt, "R").unwrap_err());
+    assert!(!err.contains("cleanup"), "{err}");
+    assert!(
+        !apt.ran
+            .iter()
+            .any(|c| c.contains("purge") || c.contains("--reinstall")),
+        "{:?}",
+        apt.ran
+    );
+}
+
+#[test]
+fn unexpected_removals_stop_the_plan() {
+    let f = rock4d();
+    let mut apt = rock4d_apt(&f);
+    apt.extra_removals.push("some-dkms-module".into());
+    let err = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("would also remove some-dkms-module"), "{err}");
+    // The dry run shows what apt resolved.
+    apt.extra_removals.clear();
+    let text = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None)
+        .unwrap()
+        .render();
+    assert!(
+        text.contains("apt resolves (apt-get -s -y install"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Remv linux-u-boot-radxa-rock-4d-edge"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_damaged_saved_package_is_not_used() {
+    let f = cm5();
+    let mut apt = FakeApt {
+        f: &f,
+        available: vec![
+            ("linux-image-vendor-rk35xx", "26.5.1"),
+            ("linux-dtb-vendor-rk35xx", "26.5.1"),
+            ("linux-u-boot-armsom-cm5-io-vendor", "26.5.1"),
+        ],
+        ran: vec![],
+        extra_removals: vec![],
+        failing: vec![],
+    };
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
+    plan.execute(&f.root(), &mut apt, "T1").unwrap();
+    let st = kernel::status(&f.root()).unwrap();
+    let uboot = st.history[0]
+        .saved
+        .iter()
+        .find(|s| s.name.starts_with("linux-u-boot"))
+        .unwrap();
+    f.write(&uboot.file, "broken");
+    // apt has no edge packages either: the revert must stop, not install a broken file.
+    struct NoEdgeApt<'a>(FakeApt<'a>);
+    impl Executor for NoEdgeApt<'_> {
+        fn run(&mut self, a: &[String]) -> Result<()> {
+            self.0.run(a)
+        }
+        fn capture(&mut self, a: &[String]) -> Result<String> {
+            if a.len() == 3 && a[1] == "policy" && a[2].contains("edge") {
+                return Ok(policy(None, &[]));
+            }
+            self.0.capture(a)
+        }
+    }
+    let mut apt = NoEdgeApt(apt);
+    let err = format!(
+        "{:#}",
+        kernel::revert_plan(&f.root(), &mut apt, false).unwrap_err()
+    );
+    assert!(err.contains("linux-u-boot-armsom-cm5-io-edge"), "{err}");
 }

@@ -19,7 +19,8 @@ pub struct Disk {
     pub kind: String,
     pub size_bytes: u64,
     pub partitions: Vec<Partition>,
-    /// The root filesystem of the running system is on this disk.
+    /// The running system uses this disk: `/`, `/boot`, or the partition
+    /// U-Boot loaded the boot script from.
     pub holds_root: bool,
     /// Mounted partitions (or the disk itself), including swap.
     pub mounted: Vec<String>,
@@ -46,66 +47,174 @@ fn skip_disk(name: &str) -> bool {
         || (name.starts_with("mmcblk") && (name.contains("boot") || name.ends_with("rpmb")))
 }
 
-/// Device names currently mounted or used as swap.
-fn in_use(root: &Root) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(m) = root.read_opt("/proc/self/mounts") {
-        for line in m.lines() {
-            if let Some(dev) = line
-                .split_whitespace()
+/// One line of /proc/self/mountinfo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mount {
+    pub majmin: String,
+    pub mountpoint: String,
+    pub fstype: String,
+    pub source: String,
+}
+
+pub fn mounts(root: &Root) -> Vec<Mount> {
+    let text = root.read_opt("/proc/self/mountinfo").unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let (left, right) = l.split_once(" - ")?;
+            let f: Vec<&str> = left.split_whitespace().collect();
+            let r: Vec<&str> = right.split_whitespace().collect();
+            (f.len() >= 5 && r.len() >= 2).then(|| Mount {
+                majmin: f[2].to_string(),
+                mountpoint: f[4].replace("\\040", " "),
+                fstype: r[0].to_string(),
+                source: r[1].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Kernel name of the block device with this major:minor number.
+fn devname(root: &Root, majmin: &str) -> Option<String> {
+    root.read_link(&format!("/sys/dev/block/{majmin}"))
+        .and_then(|t| {
+            t.trim_end_matches('/')
+                .rsplit('/')
                 .next()
-                .and_then(|d| d.strip_prefix("/dev/"))
-            {
-                out.push(dev.to_string());
+                .map(str::to_string)
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// Whole disks under a block device: the disk itself, the disk a partition
+/// belongs to, or for device mapper and RAID the disks of every slave.
+pub fn disks_under(root: &Root, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut todo = vec![name.to_string()];
+    let mut seen = Vec::new();
+    while let Some(n) = todo.pop() {
+        if seen.contains(&n) {
+            continue;
+        }
+        seen.push(n.clone());
+        let slaves = root.list_dir(&format!("/sys/block/{n}/slaves"));
+        if !slaves.is_empty() {
+            todo.extend(slaves);
+            continue;
+        }
+        if root.exists(&format!("/sys/block/{n}")) {
+            out.push(n);
+            continue;
+        }
+        // A partition: /sys/block/<disk>/<partition>.
+        if let Some(d) = root
+            .list_dir("/sys/block")
+            .into_iter()
+            .find(|d| root.exists(&format!("/sys/block/{d}/{n}/partition")))
+        {
+            let slaves = root.list_dir(&format!("/sys/block/{d}/{n}/slaves"));
+            if slaves.is_empty() {
+                out.push(d);
+            } else {
+                todo.extend(slaves);
             }
         }
     }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What the running system is on.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct System {
+    /// Kernel name of the device mounted on `/`.
+    pub root_device: String,
+    pub root_fstype: String,
+    /// Disks holding `/`, `/boot` and the partition U-Boot loaded the boot
+    /// script from (ubootpart= on the kernel command line). Destructive
+    /// commands never write to these unless asked to.
+    pub disks: Vec<String>,
+}
+
+/// Find the disks the running system uses. Fails, rather than guessing,
+/// when `/` cannot be traced to a disk.
+pub fn system(root: &Root) -> anyhow::Result<System> {
+    let ms = mounts(root);
+    let rootm = ms
+        .iter()
+        .rev()
+        .find(|m| m.mountpoint == "/")
+        .ok_or_else(|| anyhow::anyhow!("/proc/self/mountinfo has no entry for /"))?;
+    let root_device = devname(root, &rootm.majmin).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot find the block device {} that / is mounted from (source {})",
+            rootm.majmin,
+            rootm.source
+        )
+    })?;
+    let mut disks = disks_under(root, &root_device);
+    if disks.is_empty() {
+        anyhow::bail!("cannot find the disk that holds / ({root_device})");
+    }
+    if let Some(b) = ms.iter().rev().find(|m| m.mountpoint == "/boot") {
+        if let Some(d) = devname(root, &b.majmin) {
+            disks.extend(disks_under(root, &d));
+        }
+    }
+    let cmdline = root.read_opt("/proc/cmdline").unwrap_or_default();
+    if let Some(u) = cmdline
+        .split_whitespace()
+        .filter_map(|a| a.strip_prefix("ubootpart="))
+        .next_back()
+        .filter(|u| !u.is_empty())
+    {
+        if let Some(part) = root
+            .read_link(&format!("/dev/disk/by-partuuid/{}", u.to_lowercase()))
+            .or_else(|| root.read_link(&format!("/dev/disk/by-partuuid/{u}")))
+            .and_then(|t| t.rsplit('/').next().map(str::to_string))
+        {
+            disks.extend(disks_under(root, &part));
+        }
+    }
+    disks.sort();
+    disks.dedup();
+    Ok(System {
+        root_device,
+        root_fstype: rootm.fstype.clone(),
+        disks,
+    })
+}
+
+/// Kernel name of the device mounted on `/`, if it can be found.
+pub fn root_device(root: &Root) -> Option<String> {
+    system(root).ok().map(|s| s.root_device)
+}
+
+/// Device names in use: mounted file systems and swap.
+fn in_use(root: &Root) -> Vec<String> {
+    let mut out: Vec<String> = mounts(root)
+        .iter()
+        .filter_map(|m| devname(root, &m.majmin))
+        .collect();
     if let Some(s) = root.read_opt("/proc/swaps") {
         for line in s.lines().skip(1) {
-            if let Some(dev) = line
-                .split_whitespace()
-                .next()
-                .and_then(|d| d.strip_prefix("/dev/"))
-            {
-                out.push(dev.to_string());
+            if let Some(dev) = line.split_whitespace().next() {
+                let name = root
+                    .read_link(dev)
+                    .and_then(|t| t.rsplit('/').next().map(str::to_string))
+                    .or_else(|| dev.strip_prefix("/dev/").map(str::to_string));
+                if let Some(n) = name {
+                    out.push(n);
+                }
             }
         }
     }
     out
 }
 
-/// Kernel name of the partition (or disk) holding `/`.
-pub fn root_device(root: &Root) -> Option<String> {
-    let mounts = root.read_opt("/proc/self/mounts").unwrap_or_default();
-    let dev = mounts.lines().rev().find_map(|l| {
-        let f: Vec<&str> = l.split_whitespace().collect();
-        (f.len() >= 2 && f[1] == "/").then(|| f[0].to_string())
-    });
-    if let Some(d) = dev.as_deref().and_then(|d| d.strip_prefix("/dev/")) {
-        if d != "root" {
-            return Some(d.to_string());
-        }
-    }
-    // /dev/root or no /dev entry: follow root= on the kernel command line.
-    let cmdline = root.read_opt("/proc/cmdline").unwrap_or_default();
-    let arg = cmdline
-        .split_whitespace()
-        .find_map(|a| a.strip_prefix("root="))?;
-    let link = if let Some(u) = arg.strip_prefix("UUID=") {
-        format!("/dev/disk/by-uuid/{u}")
-    } else if let Some(u) = arg.strip_prefix("PARTUUID=") {
-        format!("/dev/disk/by-partuuid/{u}")
-    } else {
-        return arg.strip_prefix("/dev/").map(str::to_string);
-    };
-    root.read_link(&link)
-        .map(|t| t.rsplit('/').next().unwrap_or("").to_string())
-        .filter(|s| !s.is_empty())
-}
-
 pub fn disks(root: &Root) -> Vec<Disk> {
-    let used = in_use(root);
-    let root_dev = root_device(root);
+    let used_parts = in_use(root);
+    let system = system(root).ok();
     let mut out = Vec::new();
     for name in root.list_dir("/sys/block") {
         if skip_disk(&name) {
@@ -146,15 +255,14 @@ pub fn disks(root: &Root) -> Vec<Disk> {
             }
         }
         partitions.sort_by_key(|p| p.start_bytes);
-        let mut mounted: Vec<String> = used
+        let mut mounted: Vec<String> = used_parts
             .iter()
-            .filter(|u| **u == name || partitions.iter().any(|p| &p.name == *u))
+            .filter(|u| disks_under(root, u).contains(&name))
             .cloned()
             .collect();
+        mounted.sort();
         mounted.dedup();
-        let holds_root = root_dev
-            .as_ref()
-            .is_some_and(|r| *r == name || partitions.iter().any(|p| &p.name == r));
+        let holds_root = system.as_ref().is_some_and(|s| s.disks.contains(&name));
         out.push(Disk {
             path: format!("/dev/{name}"),
             kind: kind.into(),

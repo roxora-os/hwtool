@@ -246,6 +246,7 @@ fn validate_name(name: &str) -> Result<()> {
             .chars()
             .any(|c| c.is_whitespace() || c == '=' || c.is_control())
         || name.starts_with('.')
+        || name.starts_with('-')
     {
         bail!("invalid overlay name {name:?}");
     }

@@ -38,6 +38,14 @@ pub struct HistoryEntry {
     /// The replaced packages, saved as .deb files.
     #[serde(default)]
     pub saved: Vec<SavedPackage>,
+    /// `pending` from before the install until the switch has finished,
+    /// then `done`. A pending entry means the switch failed or was cut off.
+    #[serde(default = "done")]
+    pub state: String,
+}
+
+fn done() -> String {
+    "done".into()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,9 +195,16 @@ pub fn switch_plan(
     for pkg in &new {
         let p = policy(exec, pkg)?;
         let want = back.and_then(|h| h.from_packages.iter().find(|x| &x.name == pkg));
-        let saved = back
+        let mut saved = back
             .and_then(|h| h.saved.iter().find(|x| &x.name == pkg))
             .filter(|x| root.exists(&x.file));
+        // A saved file is used only if dpkg-deb can read it.
+        if let Some(f) = saved {
+            if !repack::is_valid(root, exec, &f.file, &f.name) {
+                crate::out::say(&format!("{} is damaged; not using it", f.file));
+                saved = None;
+            }
+        }
         match (want, saved, &p.candidate) {
             (Some(w), _, _) if p.versions.contains(&w.version) => {
                 specs.push(format!("{pkg}={}", w.version))
@@ -248,19 +263,21 @@ pub fn switch_plan(
         .collect();
     let mut saved = Vec::new();
     let mut save_steps = Vec::new();
+    let mut need_kib = 0;
     for pkg in &to_save {
         let sp = repack::plan_save(root, &pkg.name, &pkg.version, &save_dir)?;
+        need_kib += sp.installed_kib;
         saved.push(SavedPackage {
             name: pkg.name.clone(),
             version: pkg.version.clone(),
             file: sp.file.clone(),
         });
-        save_steps.push(plan::Step {
-            description: format!(
+        save_steps.push(plan::Step::new(
+            format!(
                 "Save {} {} for 'hwtool kernel revert'",
                 pkg.name, pkg.version
             ),
-            action: Action::SavePackage {
+            Action::SavePackage {
                 name: pkg.name.clone(),
                 version: pkg.version.clone(),
                 dir: save_dir.clone(),
@@ -268,8 +285,57 @@ pub fn switch_plan(
                 from_cache: sp.from_cache,
                 installed_kib: sp.installed_kib,
             },
-        });
+        ));
     }
+    repack::check_space(root, &save_dir, need_kib)?;
+
+    // What apt itself would do, so the plan shows apt's resolution and
+    // stops on removals nobody asked for.
+    let mut install_sim = argv(&["apt-get", "-s", "-y", "install"]);
+    install_sim.extend(specs.iter().cloned());
+    let sim = apt_simulate(exec, &install_sim)?;
+    let unexpected: Vec<&String> = sim
+        .removed
+        .iter()
+        .filter(|r| !(r.starts_with("linux-u-boot-") && old.iter().any(|o| &&o.name == r)))
+        .collect();
+    if !unexpected.is_empty() {
+        bail!(
+            "installing the {target} packages would also remove {}; hwtool stops here. \
+             Check with: {}",
+            unexpected
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            plan::shell_join(&install_sim)
+        );
+    }
+    let remove_sim = if !old_kernel.is_empty() && !keep_old {
+        let mut a = argv(&["apt-get", "-s", "-y", "remove"]);
+        a.extend(old_kernel.iter().cloned());
+        let r = apt_simulate(exec, &a)?;
+        let extra: Vec<&String> = r
+            .removed
+            .iter()
+            .filter(|x| !old_kernel.contains(x))
+            .collect();
+        if !extra.is_empty() {
+            bail!(
+                "removing the old kernel packages would also remove {}; hwtool stops here. \
+                 Use --keep-old, or check with: {}",
+                extra
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                plan::shell_join(&a)
+            );
+        }
+        Some(r)
+    } else {
+        None
+    };
 
     let env_text = root.read(ENV_FILE)?;
     let env = BootEnv::parse(&env_text);
@@ -290,12 +356,33 @@ pub fn switch_plan(
     );
     p.steps.extend(save_steps);
     p.run("Refresh the package lists", &["apt-get", "update"]);
+
+    let mut history = read_history(root);
+    let entry = HistoryEntry {
+        time,
+        from_branch: st.current.clone(),
+        from_packages: old.clone(),
+        to_branch: target.to_string(),
+        saved: saved.clone(),
+        state: "pending".into(),
+    };
+    history.push(entry.clone());
+    p.step(
+        format!("Record the switch as pending in {HISTORY_FILE}"),
+        Action::WriteFile {
+            path: HISTORY_FILE.into(),
+            content: serde_json::to_string_pretty(&history)? + "\n",
+        },
+    );
+
+    let install_at = p.steps.len();
     let mut install = vec!["apt-get", "install", "-y"];
     install.extend(specs.iter().map(String::as_str));
     p.run(
         format!("Install the {target} kernel, device tree and U-Boot packages"),
         &install,
     );
+    p.steps[install_at].details = sim.lines;
     let suffix = format!("-{target}-{}", board.family_for(target));
     p.step(
         "Check that the new kernel and its device tree are in place",
@@ -312,21 +399,19 @@ pub fn switch_plan(
             },
         );
     }
-    if !old_kernel.is_empty() && !keep_old {
+    if let Some(r) = remove_sim {
         let mut rm = vec!["apt-get", "remove", "-y"];
         rm.extend(old_kernel.iter().map(String::as_str));
         p.run("Remove the old kernel and device tree packages", &rm);
+        let last = p.steps.len() - 1;
+        p.steps[last].details = r.lines;
     }
-    let mut history = read_history(root);
-    history.push(HistoryEntry {
-        time,
-        from_branch: st.current.clone(),
-        from_packages: old.clone(),
-        to_branch: target.to_string(),
-        saved: saved.clone(),
-    });
+    let rollback_to = p.steps.len() - 1;
+    if let Some(last) = history.last_mut() {
+        last.state = "done".into();
+    }
     p.step(
-        format!("Record the old branch in {HISTORY_FILE} for 'hwtool kernel revert'"),
+        format!("Record the finished switch in {HISTORY_FILE} for 'hwtool kernel revert'"),
         Action::WriteFile {
             path: HISTORY_FILE.into(),
             content: serde_json::to_string_pretty(&history)? + "\n",
@@ -338,6 +423,33 @@ pub fn switch_plan(
             Action::PruneSaved {
                 keep: save_dir.clone(),
             },
+        );
+    }
+
+    // Rollback, only once the install has started: put armbianEnv.txt back,
+    // purge what the switch installed, reinstall what it replaced, and show
+    // where /boot points afterwards.
+    p.on_failure(
+        install_at,
+        rollback_to,
+        format!("Put back {ENV_FILE} from this run's backup"),
+        Action::RestoreBackup {
+            path: ENV_FILE.into(),
+        },
+    );
+    let fresh: Vec<String> = new
+        .iter()
+        .filter(|n| !installed.iter().any(|p| &&p.name == n))
+        .cloned()
+        .collect();
+    if !fresh.is_empty() && !old.is_empty() {
+        let mut purge = argv(&["apt-get", "purge", "-y"]);
+        purge.extend(fresh.iter().cloned());
+        p.on_failure(
+            install_at,
+            rollback_to,
+            format!("Purge the {target} packages this switch installed"),
+            Action::Run { argv: purge },
         );
     }
     if !old.is_empty() {
@@ -352,7 +464,7 @@ pub fn switch_plan(
                         "if [ -f '{0}' ]; then pkgs+=('{0}'); else pkgs+=('{spec}'); fi\n",
                         f.file
                     ));
-                    shows.push(format!("{} (or {spec} if it was not saved yet)", f.file));
+                    shows.push(format!("{} (or {spec} if it was not saved)", f.file));
                 }
                 None => {
                     script.push_str(&format!("pkgs+=('{spec}')\n"));
@@ -361,18 +473,26 @@ pub fn switch_plan(
             }
         }
         script.push_str("apt-get install -y --reinstall --allow-downgrades \"${pkgs[@]}\"\n");
-        p.cleanup.push(plan::Step {
-            description: "Reinstall the old packages so /boot points at the old kernel again"
-                .into(),
-            action: Action::Shell {
+        p.on_failure(
+            install_at,
+            rollback_to,
+            "Reinstall the old packages so /boot points at the old kernel again",
+            Action::Shell {
                 script,
                 shows: vec![format!(
                     "apt-get install -y --reinstall --allow-downgrades {}",
                     shows.join(" ")
                 )],
             },
-        });
+        );
     }
+    p.on_failure(
+        install_at,
+        rollback_to,
+        "Show where /boot points now",
+        Action::ReportBoot,
+    );
+
     let overlays = env.list("overlays");
     if !overlays.is_empty() {
         p.warnings.push(format!(
@@ -397,6 +517,29 @@ pub fn switch_plan(
     Ok(p)
 }
 
+struct AptSim {
+    /// Inst, Remv and Purg lines, as apt printed them.
+    lines: Vec<String>,
+    removed: Vec<String>,
+}
+
+fn apt_simulate(exec: &mut dyn Executor, args: &[String]) -> Result<AptSim> {
+    let out = exec
+        .capture(args)
+        .with_context(|| format!("apt cannot resolve: {}", plan::shell_join(args)))?;
+    let mut lines = vec![format!("apt resolves ({}):", plan::shell_join(args))];
+    let mut removed = Vec::new();
+    for l in out.lines() {
+        if let Some(rest) = l.strip_prefix("Remv ").or_else(|| l.strip_prefix("Purg ")) {
+            removed.push(rest.split_whitespace().next().unwrap_or("").to_string());
+            lines.push(format!("  {l}"));
+        } else if l.starts_with("Inst ") {
+            lines.push(format!("  {l}"));
+        }
+    }
+    Ok(AptSim { lines, removed })
+}
+
 /// Plan the way back to the branch before the last switch.
 pub fn revert_plan(root: &Root, exec: &mut dyn Executor, keep_old: bool) -> Result<Plan> {
     let history = read_history(root);
@@ -408,7 +551,19 @@ pub fn revert_plan(root: &Root, exec: &mut dyn Executor, keep_old: bool) -> Resu
         .clone()
         .context("the branch before the last switch is not known")?;
     let st = status(root)?;
-    if st.current.as_deref() != Some(last.to_branch.as_str()) {
+    if last.state == "pending" {
+        if st.current.as_deref() == Some(from.as_str()) {
+            bail!(
+                "the last switch, from {from} to {}, did not finish and this system boots {from} \
+                 again; there is nothing to revert. 'hwtool kernel status' shows the packages",
+                last.to_branch
+            );
+        }
+        crate::out::say(&format!(
+            "The last switch, from {from} to {}, did not finish; going back to {from}.",
+            last.to_branch
+        ));
+    } else if st.current.as_deref() != Some(last.to_branch.as_str()) {
         bail!(
             "the last switch went from {from} to {}, but this system now boots {}; use 'hwtool kernel switch' instead",
             last.to_branch,

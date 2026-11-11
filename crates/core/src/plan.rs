@@ -3,8 +3,9 @@
 //! confirmation prompt, and then executed step by step.
 
 use std::fmt::Write as _;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -12,6 +13,7 @@ use serde::Serialize;
 
 use crate::env::BootEnv;
 use crate::exec::Executor;
+use crate::out::say;
 use crate::root::Root;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -44,6 +46,10 @@ pub enum Action {
     },
     /// Remove saved package sets in /var/lib/hwtool/packages except `keep`.
     PruneSaved { keep: String },
+    /// Put back the copy a Backup step made of `path` during this run.
+    RestoreBackup { path: String },
+    /// Print where /boot/Image, /boot/dtb and /boot/uInitrd point. Never fails.
+    ReportBoot,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -51,14 +57,38 @@ pub struct Step {
     pub description: String,
     #[serde(flatten)]
     pub action: Action,
+    /// Extra lines shown under the step, for example what apt resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
+}
+
+impl Step {
+    pub fn new(description: impl Into<String>, action: Action) -> Self {
+        Step {
+            description: description.into(),
+            action,
+            details: Vec::new(),
+        }
+    }
+}
+
+/// A step run when the plan fails, but only if the step that failed (or the
+/// last one that ran before a signal) has an index in `from..=to`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Cleanup {
+    pub from: usize,
+    pub to: usize,
+    #[serde(flatten)]
+    pub step: Step,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Plan {
     pub title: String,
     pub steps: Vec<Step>,
-    /// Steps run after a failure, best effort (for example unmounting).
-    pub cleanup: Vec<Step>,
+    /// Steps run after a failure (for example unmounting), in order. Each
+    /// runs even if an earlier one failed; their results are reported.
+    pub cleanup: Vec<Cleanup>,
     pub warnings: Vec<String>,
     pub notices: Vec<String>,
     pub reboot_required: bool,
@@ -73,9 +103,21 @@ impl Plan {
     }
 
     pub fn step(&mut self, description: impl Into<String>, action: Action) {
-        self.steps.push(Step {
-            description: description.into(),
-            action,
+        self.steps.push(Step::new(description, action));
+    }
+
+    /// Add a cleanup step for failures at step indices `from..=to`.
+    pub fn on_failure(
+        &mut self,
+        from: usize,
+        to: usize,
+        description: impl Into<String>,
+        action: Action,
+    ) {
+        self.cleanup.push(Cleanup {
+            from,
+            to,
+            step: Step::new(description, action),
         });
     }
 
@@ -102,11 +144,22 @@ impl Plan {
         for (i, step) in self.steps.iter().enumerate() {
             let _ = writeln!(out, "\n{:>2}. {}", i + 1, step.description);
             render_action(&mut out, &step.action);
+            for d in &step.details {
+                let _ = writeln!(out, "      {d}");
+            }
         }
         if !self.cleanup.is_empty() {
-            let _ = writeln!(out, "\nIf a step fails, hwtool then runs:");
-            for step in &self.cleanup {
-                render_action(&mut out, &step.action);
+            let _ = writeln!(out, "\nIf a step fails or hwtool is interrupted:");
+            for c in &self.cleanup {
+                let range = if c.from == c.to {
+                    format!("step {}", c.from + 1)
+                } else if c.to >= self.steps.len().saturating_sub(1) {
+                    format!("steps {} and later", c.from + 1)
+                } else {
+                    format!("steps {} to {}", c.from + 1, c.to + 1)
+                };
+                let _ = writeln!(out, "  after {range}: {}", c.step.description);
+                render_action(&mut out, &c.step.action);
             }
         }
         for w in &self.warnings {
@@ -121,29 +174,118 @@ impl Plan {
         out
     }
 
-    /// Execute every step in order. Stops at the first failure, then runs
-    /// the cleanup steps.
+    /// A short fingerprint of what the plan does, with time stamps left
+    /// out. The GTK app shows a dry run as the user and passes its
+    /// fingerprint to the root run, which refuses if its own plan differs.
+    pub fn fingerprint(&self) -> String {
+        let text = mask_stamps(&self.render());
+        // FNV-1a, 64 bit: stable across builds and enough to tell plans apart.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in text.bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        format!("{h:016x}")
+    }
+
+    /// Execute every step in order. Stops at the first failure or signal,
+    /// runs the cleanup steps that apply, and reports their results.
     pub fn execute(&self, root: &Root, exec: &mut dyn Executor, stamp: &str) -> Result<()> {
         // Never reuse a backup directory: two changes within one second
         // would otherwise overwrite the first backup.
         let mut stamp = stamp.to_string();
+        let base = stamp.clone();
         let mut n = 1;
-        while root.exists(&format!("{}/{stamp}", crate::BACKUP_DIR)) {
-            stamp = format!("{}-{n}", stamp.split('-').next().unwrap_or(&stamp));
+        while root.exists(&format!("{}/{stamp}", crate::BACKUP_DIR))
+            || root.exists(&format!("{}/{stamp}.log", crate::out::LOG_DIR))
+        {
+            stamp = format!("{base}-{n}");
             n += 1;
         }
         let stamp = stamp.as_str();
+        crate::signals::install();
+        let log = crate::out::open_log(root, stamp)?;
+        say(&format!("Log: {log}"));
+        let result = self.run_steps(root, exec, stamp);
+        if let Err(e) = &result {
+            say(&format!("Failed: {e:#}"));
+        }
+        say(&format!("Log: {log}"));
+        crate::out::close_log();
+        result
+    }
+
+    fn run_steps(&self, root: &Root, exec: &mut dyn Executor, stamp: &str) -> Result<()> {
+        let mut last_started: Option<usize> = None;
+        let mut failure: Option<anyhow::Error> = None;
         for (i, step) in self.steps.iter().enumerate() {
-            eprintln!("[{}/{}] {}", i + 1, self.steps.len(), step.description);
+            if crate::signals::interrupted() {
+                failure = Some(anyhow!("interrupted by a signal before step {}", i + 1));
+                break;
+            }
+            say(&format!(
+                "[{}/{}] {}",
+                i + 1,
+                self.steps.len(),
+                step.description
+            ));
+            last_started = Some(i);
             if let Err(e) = apply(root, exec, stamp, &step.action) {
-                for c in &self.cleanup {
-                    let _ = apply(root, exec, stamp, &c.action);
-                }
-                return Err(e.context(format!("step {} failed: {}", i + 1, step.description)));
+                failure = Some(e.context(format!("step {} failed: {}", i + 1, step.description)));
+                break;
             }
         }
-        Ok(())
+        let Some(err) = failure else {
+            return Ok(());
+        };
+        let mut report = Vec::new();
+        if let Some(at) = last_started {
+            for c in self.cleanup.iter().filter(|c| c.from <= at && at <= c.to) {
+                say(&format!("Cleanup: {}", c.step.description));
+                match apply(root, exec, stamp, &c.step.action) {
+                    Ok(()) => report.push(format!("done: {}", c.step.description)),
+                    Err(e) => {
+                        say(&format!("Cleanup failed: {e:#}"));
+                        report.push(format!("FAILED: {}: {e:#}", c.step.description));
+                    }
+                }
+            }
+        }
+        if report.is_empty() {
+            Err(err)
+        } else {
+            Err(err.context(format!("cleanup:\n  {}", report.join("\n  "))))
+        }
     }
+}
+
+/// Replace time stamps (YYYYMMDDTHHMMSSZ, optionally -N) with <time>.
+pub fn mask_stamps(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        let is_stamp = i + 16 <= b.len()
+            && b[i..i + 8].iter().all(u8::is_ascii_digit)
+            && b[i + 8] == b'T'
+            && b[i + 9..i + 15].iter().all(u8::is_ascii_digit)
+            && b[i + 15] == b'Z';
+        if is_stamp {
+            out.push_str("<time>");
+            i += 16;
+            if i < b.len() && b[i] == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit() {
+                i += 1;
+                while i < b.len() && b[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+        } else {
+            let ch = text[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 fn render_action(out: &mut String, action: &Action) {
@@ -210,6 +352,19 @@ fn render_action(out: &mut String, action: &Action) {
                 "    check /boot/Image points at a kernel ending in {suffix} and /boot/dtb/<fdtfile> exists"
             );
         }
+        Action::RestoreBackup { path } => {
+            let _ = writeln!(
+                out,
+                "    copy {}/<time>{path} back to {path}",
+                crate::BACKUP_DIR
+            );
+        }
+        Action::ReportBoot => {
+            let _ = writeln!(
+                out,
+                "    show where /boot/Image, /boot/dtb and /boot/uInitrd point"
+            );
+        }
     }
 }
 
@@ -266,10 +421,28 @@ fn apply(root: &Root, exec: &mut dyn Executor, stamp: &str, action: &Action) -> 
             name, version, dir, ..
         } => {
             let f = crate::repack::save(root, exec, name, version, dir)?;
-            eprintln!("    saved: {f}");
+            say(&format!("    saved: {f}"));
             Ok(())
         }
         Action::PruneSaved { keep } => crate::repack::prune(root, keep),
+        Action::RestoreBackup { path } => {
+            let copy = format!("{}/{stamp}{path}", crate::BACKUP_DIR);
+            let content = root
+                .read(&copy)
+                .with_context(|| format!("no backup of {path} from this run"))?;
+            write_file(root, path, &content)?;
+            say(&format!("    restored {path} from {copy}"));
+            Ok(())
+        }
+        Action::ReportBoot => {
+            for l in ["/boot/Image", "/boot/dtb", "/boot/uInitrd"] {
+                let t = root
+                    .read_link(l)
+                    .unwrap_or_else(|| "(missing or not a link)".into());
+                say(&format!("    {l} -> {t}"));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -278,18 +451,37 @@ fn backup(root: &Root, stamp: &str, path: &str) -> Result<()> {
     if !src.exists() {
         return Ok(());
     }
-    let dst = root.path(&format!("{}/{stamp}{path}", crate::BACKUP_DIR));
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    fs::copy(&src, &dst).with_context(|| format!("cannot back up {path}"))?;
-    eprintln!("    backup: {}", root.unmap(&dst));
+    let copy = format!("{}/{stamp}{path}", crate::BACKUP_DIR);
+    let dst = root.path(&copy);
+    let parent = dst
+        .parent()
+        .ok_or_else(|| anyhow!("{copy} has no parent directory"))?;
+    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
+    let content = fs::read(&src).with_context(|| format!("cannot read {path}"))?;
+    let mut f = new_file(&dst, 0o600).with_context(|| format!("cannot create {copy}"))?;
+    f.write_all(&content)
+        .and_then(|_| f.sync_all())
+        .with_context(|| format!("cannot write {copy}"))?;
+    sync_dir(parent);
+    say(&format!("    backup: {copy}"));
     Ok(())
 }
 
-/// Write through a temporary file in the same directory and rename it, so
-/// the file is never left half written. Keeps the mode of an existing file.
+/// Create a file that does not exist yet. Never opens an existing file and
+/// never follows a symbolic link.
+fn new_file(path: &Path, mode: u32) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+/// Replace a file durably: write a new temporary file in the same
+/// directory, flush it to disk, rename it over the file, flush the
+/// directory. A crash leaves either the old or the new file. Keeps the mode
+/// of an existing file.
 pub fn write_file(root: &Root, path: &str, content: &str) -> Result<()> {
     let dst = root.path(path);
     let parent = dst
@@ -300,10 +492,19 @@ pub fn write_file(root: &Root, path: &str, content: &str) -> Result<()> {
         ".{}.hwtool-new",
         dst.file_name().unwrap_or_default().to_string_lossy()
     ));
-    fs::write(&tmp, content).with_context(|| format!("cannot write {}", tmp.display()))?;
-    if let Ok(meta) = fs::metadata(&dst) {
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(meta.permissions().mode()));
-    }
+    // A leftover from an interrupted run (removing a link removes the link).
+    let _ = fs::remove_file(&tmp);
+    let mode = fs::symlink_metadata(&dst)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644);
+    let mut f = new_file(&tmp, mode).with_context(|| format!("cannot create {}", tmp.display()))?;
+    f.write_all(content.as_bytes())
+        .and_then(|_| f.sync_all())
+        .with_context(|| format!("cannot write {}", tmp.display()))?;
+    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode));
+    drop(f);
     fs::rename(&tmp, &dst).with_context(|| format!("cannot replace {path}"))?;
     sync_dir(parent);
     Ok(())
@@ -374,6 +575,14 @@ mod tests {
         assert_eq!(
             out,
             "UUID=new / ext4 defaults,errors=remount-ro 0 1\ntmpfs /tmp tmpfs defaults,nosuid 0 0\n"
+        );
+    }
+
+    #[test]
+    fn stamps_are_masked() {
+        assert_eq!(
+            mask_stamps("a /x/20261111T041751Z-2/y 20261111T041751Z. 2026"),
+            "a /x/<time>/y <time>. 2026"
         );
     }
 

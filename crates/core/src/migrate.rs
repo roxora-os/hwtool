@@ -28,7 +28,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::bootloader::{self, Target};
 use crate::exec::{argv, Executor};
-use crate::plan::{Action, Plan, Step};
+use crate::plan::{Action, Plan};
 use crate::root::Root;
 use crate::storage::{self, part_dev};
 use crate::ENV_FILE;
@@ -48,6 +48,26 @@ const TOOLS: &[(&str, &str)] = &[
     ("partprobe", "parted"),
     ("udevadm", "udev"),
 ];
+
+/// First partition offset: 16 MiB on eMMC, room for U-Boot
+/// (install_plan_layout), 1 MiB elsewhere.
+fn start_mib(kind: &str) -> u32 {
+    if kind == "emmc" {
+        16
+    } else {
+        1
+    }
+}
+
+fn df_used(exec: &mut dyn Executor, path: &str) -> Result<u64> {
+    let out = exec
+        .capture(&argv(&["df", "-B1", "--output=used", path]))
+        .with_context(|| format!("cannot tell how much of {path} is used"))?;
+    out.lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .find(|&n| n > 0)
+        .with_context(|| format!("cannot tell how much of {path} is used: {}", out.trim()))
+}
 
 pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool) -> Result<Plan> {
     let disk = storage::find_disk(root, target)
@@ -99,25 +119,37 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
             false,
             Some(16 << 20),
         )),
-        _ if write_spi => Some(bootloader::write_plan(root, &Target::Spi, false)),
+        _ if write_spi => Some(bootloader::write_plan_with(root, &Target::Spi, false, None)),
         _ => None,
     }
     .transpose()?;
 
-    let root_part = storage::root_device(root).context("cannot find the device of /")?;
+    let sys = storage::system(root)?;
+    if sys.root_fstype != "ext4" {
+        bail!(
+            "/ is {}, not ext4; hwtool copies ext4 systems only",
+            sys.root_fstype
+        );
+    }
+    let root_part = sys.root_device.clone();
     let root_disk = storage::disks(root)
         .into_iter()
-        .find(|d| d.holds_root)
+        .find(|d| d.holds_root && storage::disks_under(root, &root_part).contains(&d.name))
         .context("cannot find the disk that holds /")?;
-    let used: u64 = exec
-        .capture(&argv(&["df", "-B1", "--output=used", "/"]))?
-        .lines()
-        .filter_map(|l| l.trim().parse().ok())
-        .next()
-        .unwrap_or(0);
-    if used > 0 && disk.size_bytes < used + 256 * 1024 * 1024 {
+    // Bytes used on / and, if it is a separate file system, /boot. Fails
+    // closed: no number, no migration.
+    let mut used = df_used(exec, "/")?;
+    if storage::mounts(root)
+        .iter()
+        .any(|m| m.mountpoint == "/boot")
+    {
+        used += df_used(exec, "/boot")?;
+    }
+    let need = used + (u64::from(start_mib(&disk.kind)) << 20) + (256 << 20);
+    if disk.size_bytes < need {
         bail!(
-            "{target} has {} bytes; the running system uses {used} bytes plus room for the copy",
+            "{target} has {} bytes; the copy needs {need} ({used} bytes in use, the space \
+             before the first partition and 256 MiB to spare)",
             disk.size_bytes
         );
     }
@@ -131,7 +163,7 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
         "dos" => "msdos",
         _ => "gpt",
     };
-    let start = if mode == "emmc" { 16 } else { 1 };
+    let start = start_mib(&disk.kind);
     let part = part_dev(&disk.path, 1);
     let t = disk.path.as_str();
 
@@ -215,12 +247,11 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
             mount: MOUNT.into(),
         },
     );
-    if let Some(bw) = &boot_write {
-        for s in &bw.steps {
-            p.steps.push(s.clone());
-        }
-        p.warnings.extend(bw.warnings.iter().cloned());
-    }
+    let mount_at = p
+        .steps
+        .iter()
+        .position(|s| s.description.starts_with("Mount "))
+        .unwrap_or(0);
     p.step(
         "Check the copy can boot",
         Action::VerifyTarget {
@@ -228,19 +259,47 @@ pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool)
         },
     );
     p.run("Flush the writes", &["sync"]);
+    // The bootloader goes on only after the copy has been checked.
+    if let Some(bw) = &boot_write {
+        let first = p.steps.len();
+        for s in &bw.plan.steps {
+            p.steps.push(s.clone());
+        }
+        let last = p.steps.len() - 1;
+        p.warnings.extend(bw.plan.warnings.iter().cloned());
+        if mode == "emmc" {
+            // A failed write leaves part of a U-Boot on the eMMC; zero what
+            // it was writing so the board does not try to start it.
+            let zero = bootloader::zero_script(&bw.writes, t);
+            p.on_failure(
+                first,
+                last,
+                format!("Zero the U-Boot area of {t}"),
+                Action::Shell {
+                    shows: zero.1,
+                    script: zero.0,
+                },
+            );
+        }
+    }
     p.run(format!("Unmount {MOUNT}"), &["umount", MOUNT]);
-    p.cleanup.push(Step {
-        description: "Unmount the target".into(),
-        action: Action::Run {
+    let end = p.steps.len() - 1;
+    p.on_failure(
+        mount_at,
+        end,
+        "Unmount the target",
+        Action::Run {
             argv: argv(&["umount", "-R", MOUNT]),
         },
-    });
+    );
 
     p.warnings.push(format!("Everything on {t} is erased."));
     match mode {
         "emmc" => p.notices.push(
-            "Power off, remove the SD card and start the board: it boots from the eMMC. \
-             The SD card is not changed and still boots the old copy."
+            "Power off, remove the SD card, then start the board from the eMMC. Keep the SD \
+             card until the eMMC copy has booted: it still holds the old system. Leave it out \
+             while testing: on boards whose U-Boot looks at the SD card first (the ROCK 4D \
+             with U-Boot in SPI flash) it would start the old system again."
                 .to_string(),
         ),
         _ => p.notices.push(if write_spi {

@@ -143,91 +143,349 @@ fn writer_script(func_call: &str) -> String {
     format!("set -e -o pipefail\nsource {PLATFORM_INSTALL}\n{func_call} | cat\nsync\n")
 }
 
-/// Run the writer function with `dd` and `flashcp` replaced by stubs that
-/// print their arguments, to show exactly what the real run would write.
-/// Nothing is written.
-pub fn expand(root: &Root, func_call: &str) -> Result<Vec<String>> {
+/// One write the U-Boot package's writer would do.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Write {
+    /// The command as the writer would run it.
+    pub line: String,
+    pub file: String,
+    pub device: String,
+    pub offset: u64,
+    pub len: u64,
+}
+
+/// Read-only programs a writer may run while hwtool shows what it would do.
+const READ_ONLY: &[&str] = &[
+    "basename", "dirname", "ls", "stat", "cat", "head", "tail", "grep", "wc", "sort", "tr", "cut",
+    "uname", "lsblk", "blkid", "findfs", "true", "false", "sleep", "sync",
+];
+
+fn shim_dir() -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let d = std::env::temp_dir().join(format!(
+        "hwtool-shims-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir(&d).with_context(|| format!("cannot create {}", d.display()))?;
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755))?;
+    let put = |name: &str, body: &str| -> Result<()> {
+        let f = d.join(name);
+        std::fs::write(&f, format!("#!/bin/sh\n{body}\n"))?;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755))?;
+        Ok(())
+    };
+    // The two writers hwtool knows how to show.
+    put("dd", r#"printf 'dd'; printf ' %s' "$@"; printf '\n'"#)?;
+    put(
+        "flashcp",
+        r#"printf 'flashcp'; printf ' %s' "$@"; printf '\n'"#,
+    )?;
+    put("dialog", "exit 1")?;
+    // find, minus everything that writes or runs programs.
+    put(
+        "find",
+        r#"for a in "$@"; do case "$a" in -delete|-exec|-execdir|-ok|-okdir|-fprint*|-fls) echo "HWTOOL-UNKNOWN find $a"; exit 127;; esac; done
+for p in /usr/bin/find /bin/find; do [ -x "$p" ] && exec "$p" "$@"; done; exit 127"#,
+    )?;
+    for t in READ_ONLY {
+        put(
+            t,
+            &format!(
+                r#"for p in /usr/bin/{t} /bin/{t} /usr/sbin/{t} /sbin/{t}; do [ -x "$p" ] && exec "$p" "$@"; done; exit 127"#
+            ),
+        )?;
+    }
+    Ok(d)
+}
+
+/// Run the writer function and collect what it would write, without
+/// writing anything:
+///
+/// - bash runs in restricted mode: no command names with a slash, no output
+///   redirection, no changing PATH, no exec;
+/// - PATH holds only shims: `dd` and `flashcp` print their arguments, a few
+///   read-only tools pass through, any other command is reported and makes
+///   hwtool refuse the write, since it could not show what that command does;
+/// - when hwtool runs as root (sudo, pkexec), bash runs as user nobody.
+///
+/// Every dd and flashcp line must parse completely and name exactly
+/// `allowed` devices, or hwtool refuses.
+pub fn expand(root: &Root, func_call: &str, allowed: &[String]) -> Result<Vec<Write>> {
     let prefix = if root.is_system() {
         String::new()
     } else {
         root.base().display().to_string()
     };
+    let shims = shim_dir()?;
     let script = format!(
-        "dd() {{ printf 'dd'; printf ' %s' \"$@\"; printf '\\n'; }}\n\
-         flashcp() {{ printf 'flashcp'; printf ' %s' \"$@\"; printf '\\n'; }}\n\
-         dialog() {{ return 1; }}\n\
+        "unset HISTFILE\n\
          source \"$HWTOOL_ROOT{PLATFORM_INSTALL}\"\n\
          DIR=\"$HWTOOL_ROOT$DIR\"\n\
-         {func_call} | cat\n"
+         command_not_found_handle() {{ echo \"HWTOOL-UNKNOWN $1\"; return 127; }}\n\
+         PATH=\"$HWTOOL_SHIMS\"\n\
+         readonly PATH SHELL ENV BASH_ENV HISTFILE\n\
+         readonly -f command_not_found_handle\n\
+         set -r\n\
+         {func_call}\n"
     );
-    let out = Command::new("bash")
+    let mut cmd = Command::new("bash");
+    cmd.arg("--norc")
+        .arg("--noprofile")
         .arg("-c")
         .arg(&script)
+        .env_clear()
         .env("HWTOOL_ROOT", &prefix)
-        .output()
-        .context("cannot run bash")?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() {
+        .env("HWTOOL_SHIMS", &shims)
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null());
+    // SAFETY: getuid only reads.
+    if unsafe { libc::geteuid() } == 0 {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setgid(65534) != 0
+                    || libc::setuid(65534) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let out = cmd.output();
+    let _ = std::fs::remove_dir_all(&shims);
+    let out = out.context("cannot run bash")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).replace(&prefix_or_none(&prefix), "");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let unknown: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("HWTOOL-UNKNOWN "))
+        .collect();
+    if !unknown.is_empty() {
         bail!(
-            "the U-Boot package's writer refused: {}{}",
-            stdout.trim(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            "the U-Boot package's writer runs {}, which hwtool cannot show before it runs; refusing",
+            unknown.join(", ")
         );
     }
-    let lines: Vec<String> = stdout
-        .lines()
-        .filter(|l| l.starts_with("dd ") || l.starts_with("flashcp "))
-        .map(|l| {
-            if prefix.is_empty() {
-                l.to_string()
-            } else {
-                l.replace(&prefix, "")
-            }
-        })
-        .collect();
-    if lines.is_empty() {
+    // Restricted bash reports absolute command paths, output redirection,
+    // exec and PATH changes on standard error. Any error output means the
+    // writer did something hwtool cannot show: refuse.
+    if !stderr.trim().is_empty() {
+        bail!(
+            "the U-Boot package's writer does something hwtool cannot show before it runs \
+             (an absolute command path, an output redirection, exec or an error): {}",
+            stderr.trim()
+        );
+    }
+    if !out.status.success() {
+        bail!(
+            "the U-Boot package's writer refused: {} {}",
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+    let mut writes = Vec::new();
+    for l in stdout.lines() {
+        if l.starts_with("dd ") || l.starts_with("flashcp ") {
+            writes.push(parse_write(root, l)?);
+        } else if !l.trim().is_empty() {
+            crate::out::say(&format!("    writer says: {l}"));
+        }
+    }
+    if writes.is_empty() {
         bail!(
             "the U-Boot package's writer does not write anything: {}",
             stdout.trim()
         );
     }
-    Ok(lines)
-}
-
-/// End offset in bytes of a `dd ... of=<disk>` write, if it targets `disk`.
-fn dd_end(root: &Root, cmd: &str, disk: &str) -> Option<u64> {
-    let mut input = None;
-    let mut output = None;
-    let mut bs = 512u64;
-    let mut seek = 0u64;
-    for a in cmd.split_whitespace().skip(1) {
-        let (k, v) = a.split_once('=')?;
-        match k {
-            "if" => input = Some(v.to_string()),
-            "of" => output = Some(v.to_string()),
-            "bs" | "obs" => bs = parse_size(v)?,
-            "seek" | "oseek" => seek = v.parse().ok()?,
-            _ => {}
+    for w in &writes {
+        if !allowed.contains(&w.device) {
+            bail!(
+                "'{}' writes to {}, not to {}; refusing",
+                w.line,
+                w.device,
+                allowed.join(" or ")
+            );
         }
     }
-    if output.as_deref() != Some(disk) {
-        return None;
-    }
-    let len = std::fs::metadata(root.path(&input?)).ok()?.len();
-    Some(seek * bs + len)
+    Ok(writes)
 }
 
-fn parse_size(v: &str) -> Option<u64> {
-    let (num, mul) = match v.chars().last()? {
-        'k' | 'K' => (&v[..v.len() - 1], 1024),
-        'M' => (&v[..v.len() - 1], 1024 * 1024),
-        _ => (v, 1),
+fn prefix_or_none(p: &str) -> String {
+    if p.is_empty() {
+        "\u{0}never\u{0}".into()
+    } else {
+        p.to_string()
+    }
+}
+
+/// A dd size: a number with an optional GNU suffix (c, w, b, K/k, kB/KB, M,
+/// MB, G, GB). Anything else (for example `2x512`) is refused.
+pub fn parse_size(v: &str) -> Option<u64> {
+    let split = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
+    let (num, suf) = v.split_at(split);
+    let n: u64 = num.parse().ok()?;
+    let mul: u64 = match suf {
+        "" | "c" => 1,
+        "w" => 2,
+        "b" => 512,
+        "K" | "k" | "KiB" => 1 << 10,
+        "kB" | "KB" => 1000,
+        "M" | "MiB" => 1 << 20,
+        "MB" => 1_000_000,
+        "G" | "GiB" => 1 << 30,
+        "GB" => 1_000_000_000,
+        _ => return None,
     };
-    num.parse::<u64>().ok().map(|n| n * mul)
+    n.checked_mul(mul)
+}
+
+/// Parse one dd or flashcp line completely, or fail.
+pub fn parse_write(root: &Root, line: &str) -> Result<Write> {
+    let mut words = line.split_whitespace();
+    let tool = words.next().unwrap_or("");
+    let args: Vec<&str> = words.collect();
+    let file_len = |f: &str| -> Result<u64> {
+        Ok(std::fs::metadata(root.path(f))
+            .with_context(|| format!("'{line}': {f} does not exist"))?
+            .len())
+    };
+    match tool {
+        "dd" => {
+            let (mut input, mut output) = (None, None);
+            let (mut bs, mut ibs, mut obs) = (None, 512u64, 512u64);
+            let (mut seek, mut skip, mut count) = (0u64, 0u64, None);
+            let (mut seek_bytes, mut skip_bytes, mut count_bytes, mut pad) =
+                (false, false, false, false);
+            for a in &args {
+                let (k, v) = a
+                    .split_once('=')
+                    .with_context(|| format!("'{line}': cannot read '{a}'"))?;
+                let size =
+                    || parse_size(v).with_context(|| format!("'{line}': cannot read size '{v}'"));
+                match k {
+                    "if" => input = Some(v.to_string()),
+                    "of" => output = Some(v.to_string()),
+                    "bs" => bs = Some(size()?),
+                    "ibs" => ibs = size()?,
+                    "obs" => obs = size()?,
+                    "seek" | "oseek" => seek = size()?,
+                    "skip" | "iseek" => skip = size()?,
+                    "count" => count = Some(size()?),
+                    "status" => {}
+                    "conv" => {
+                        for c in v.split(',') {
+                            match c {
+                                "notrunc" | "fsync" | "fdatasync" | "noerror" => {}
+                                "sync" => pad = true,
+                                _ => bail!("'{line}': conv={c} is not supported"),
+                            }
+                        }
+                    }
+                    "oflag" | "iflag" => {
+                        for f in v.split(',') {
+                            match (k, f) {
+                                ("oflag", "seek_bytes") => seek_bytes = true,
+                                ("iflag", "skip_bytes") => skip_bytes = true,
+                                ("iflag", "count_bytes") => count_bytes = true,
+                                (_, "sync" | "dsync" | "direct" | "fullblock") => {}
+                                _ => bail!("'{line}': {k}={f} is not supported"),
+                            }
+                        }
+                    }
+                    _ => bail!("'{line}': {k}= is not supported"),
+                }
+            }
+            if let Some(b) = bs {
+                ibs = b;
+                obs = b;
+            }
+            if ibs == 0 || obs == 0 {
+                bail!("'{line}': block size 0");
+            }
+            let file = input.with_context(|| format!("'{line}': no if="))?;
+            let device = output.with_context(|| format!("'{line}': no of="))?;
+            let total = file_len(&file)?;
+            let start_in = if skip_bytes { skip } else { skip * ibs };
+            let mut len = total.saturating_sub(start_in);
+            if let Some(c) = count {
+                len = len.min(if count_bytes { c } else { c * ibs });
+            }
+            if pad {
+                len = len.div_ceil(ibs) * ibs;
+            }
+            let offset = if seek_bytes { seek } else { seek * obs };
+            Ok(Write {
+                line: line.to_string(),
+                file,
+                device,
+                offset,
+                len,
+            })
+        }
+        "flashcp" => {
+            let mut pos = Vec::new();
+            for a in &args {
+                match *a {
+                    "-v" | "--verbose" | "-p" | "--partition" | "-A" | "--erase-all" => {}
+                    o if o.starts_with('-') => bail!("'{line}': option {o} is not supported"),
+                    x => pos.push(x),
+                }
+            }
+            if pos.len() != 2 {
+                bail!("'{line}': expected a file and a device");
+            }
+            let len = file_len(pos[0])?;
+            Ok(Write {
+                line: line.to_string(),
+                file: pos[0].to_string(),
+                device: pos[1].to_string(),
+                offset: 0,
+                len,
+            })
+        }
+        _ => bail!("cannot read '{line}'"),
+    }
+}
+
+/// A script that zeroes what `writes` wrote to `device`, for cleanup.
+pub fn zero_script(writes: &[Write], device: &str) -> (String, Vec<String>) {
+    let mut script = String::from("set -e\n");
+    let mut shows = Vec::new();
+    for w in writes.iter().filter(|w| w.device == device) {
+        let cmd = if w.offset % 512 == 0 {
+            format!(
+                "dd if=/dev/zero of={device} bs=512 seek={} count={} conv=notrunc,fsync status=none",
+                w.offset / 512,
+                w.len.div_ceil(512)
+            )
+        } else {
+            format!(
+                "dd if=/dev/zero of={device} bs=1 seek={} count={} conv=notrunc,fsync status=none",
+                w.offset, w.len
+            )
+        };
+        script.push_str(&cmd);
+        script.push('\n');
+        shows.push(cmd);
+    }
+    (script, shows)
+}
+
+/// A planned bootloader write and the writes it consists of.
+pub struct WritePlan {
+    pub plan: Plan,
+    pub writes: Vec<Write>,
 }
 
 pub fn write_plan(root: &Root, target: &Target, allow_booted: bool) -> Result<Plan> {
-    write_plan_with(root, target, allow_booted, None)
+    Ok(write_plan_with(root, target, allow_booted, None)?.plan)
 }
 
 /// Like [`write_plan`]; `planned_start` is the first partition's start in
@@ -237,7 +495,7 @@ pub fn write_plan_with(
     target: &Target,
     allow_booted: bool,
     planned_start: Option<u64>,
-) -> Result<Plan> {
+) -> Result<WritePlan> {
     let u = detect(root).with_context(|| {
         format!("{PLATFORM_INSTALL} is missing: install the board's linux-u-boot-<board>-<branch> package first")
     })?;
@@ -254,6 +512,7 @@ pub fn write_plan_with(
             let first = spi
                 .first()
                 .context("no SPI flash is visible to the kernel (no /sys/class/mtd/mtd0)")?;
+            let block = format!("/dev/{}", first.name.replace("mtd", "mtdblock"));
             let list: Vec<String> = spi
                 .iter()
                 .map(|m| m.name.replace("mtd", "mtdblock"))
@@ -264,26 +523,44 @@ pub fn write_plan_with(
                 .map(|i| format!(" \"$DIR/{i}\""))
                 .unwrap_or_default();
             let call = format!(
-                "write_uboot_platform_mtd \"$DIR\" /dev/{} /dev/null \"{}\"{image}",
-                first.name.replace("mtd", "mtdblock"),
+                "write_uboot_platform_mtd \"$DIR\" {block} /dev/null \"{}\"{image}",
                 list.join(" ")
             );
-            let shows = expand(root, &call)?;
-            if shows.iter().any(|s| s.starts_with("flashcp")) && !root.has_program("flashcp") {
+            let writes = expand(root, &call, &[first.path.clone(), block.clone()])?;
+            if writes.iter().any(|w| w.line.starts_with("flashcp")) && !root.has_program("flashcp")
+            {
                 bail!("flashcp is not installed; install the mtd-utils package");
             }
+            for w in &writes {
+                if first.size_bytes > 0 && w.offset + w.len > first.size_bytes {
+                    bail!(
+                        "'{}' writes {} bytes, more than the {} bytes of {}",
+                        w.line,
+                        w.offset + w.len,
+                        first.size_bytes,
+                        first.path
+                    );
+                }
+            }
+            let devices: Vec<&str> = {
+                let mut d: Vec<&str> = writes.iter().map(|w| w.device.as_str()).collect();
+                d.dedup();
+                d
+            };
             let mut plan = Plan::new(format!(
-                "Write U-Boot from {pkg} to SPI flash {}",
-                first.path
+                "Write U-Boot from {pkg} to SPI flash {} ({}, {} bytes)",
+                devices.join(" "),
+                first.label,
+                first.size_bytes
             ));
             plan.step(
                 format!(
-                    "Write U-Boot to SPI flash ({} {} bytes) with {pkg}'s write_uboot_platform_mtd",
-                    first.label, first.size_bytes
+                    "Write U-Boot to {} with {pkg}'s write_uboot_platform_mtd",
+                    devices.join(" ")
                 ),
                 Action::Shell {
                     script: writer_script(&call),
-                    shows,
+                    shows: writes.iter().map(|w| w.line.clone()).collect(),
                 },
             );
             plan.warnings.push(
@@ -291,12 +568,15 @@ pub fn write_plan_with(
                     .into(),
             );
             plan.reboot_required = true;
-            Ok(plan)
+            Ok(WritePlan { plan, writes })
         }
         Target::Disk(dev) => {
             if !u.has("write_uboot_platform") {
                 bail!("{pkg} has no write_uboot_platform function");
             }
+            // Fail closed: without knowing which disk the system runs from,
+            // hwtool cannot tell whether this write hits it.
+            storage::system(root).context("cannot tell which disk the running system uses")?;
             let disk = storage::find_disk(root, dev)
                 .with_context(|| format!("{dev} is not a disk on this system"))?;
             if !disk.name.starts_with("mmcblk") {
@@ -313,16 +593,21 @@ pub fn write_plan_with(
                 );
             }
             let call = format!("write_uboot_platform \"$DIR\" {dev}");
-            let shows = expand(root, &call)?;
+            let writes = expand(root, &call, std::slice::from_ref(&disk.path))?;
             let first = planned_start.or(disk.partitions.first().map(|p| p.start_bytes));
-            for s in &shows {
-                if let (Some(end), Some(start)) = (dd_end(root, s, dev), first) {
+            for w in &writes {
+                let end = w.offset + w.len;
+                if let Some(start) = first {
                     if end > start {
                         bail!(
-                            "{s} would write up to byte {end}, past the start of the first partition \
-                             at byte {start}; refusing to overwrite partition data"
+                            "'{}' would write up to byte {end}, past the start of the first partition \
+                             at byte {start}; refusing to overwrite partition data",
+                            w.line
                         );
                     }
+                }
+                if disk.size_bytes > 0 && end > disk.size_bytes {
+                    bail!("'{}' would write past the end of {dev}", w.line);
                 }
             }
             let mut plan = Plan::new(format!("Write U-Boot from {pkg} to {dev} ({})", disk.kind));
@@ -330,7 +615,7 @@ pub fn write_plan_with(
                 format!("Write U-Boot to {dev} with {pkg}'s write_uboot_platform"),
                 Action::Shell {
                     script: writer_script(&call),
-                    shows,
+                    shows: writes.iter().map(|w| w.line.clone()).collect(),
                 },
             );
             if disk.partitions.is_empty() && planned_start.is_none() {
@@ -344,7 +629,25 @@ pub fn write_plan_with(
                 ));
             }
             plan.reboot_required = true;
-            Ok(plan)
+            Ok(WritePlan { plan, writes })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("32k"), Some(32768));
+        assert_eq!(parse_size("32K"), Some(32768));
+        assert_eq!(parse_size("1M"), Some(1 << 20));
+        assert_eq!(parse_size("2b"), Some(1024));
+        assert_eq!(parse_size("1kB"), Some(1000));
+        assert_eq!(parse_size("64"), Some(64));
+        assert_eq!(parse_size("2x512"), None);
+        assert_eq!(parse_size("1T"), None);
+        assert_eq!(parse_size(""), None);
     }
 }

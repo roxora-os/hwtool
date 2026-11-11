@@ -140,7 +140,7 @@ fn missing_and_invalid_names() {
     let st = overlays::status(&f.root()).unwrap();
     assert_eq!(st.missing, vec!["gone"]);
     assert!(overlays::disable(&f.root(), &names(&["other"])).is_err());
-    for bad in ["a b", "../x", "x=y", ""] {
+    for bad in ["a b", "../x", "x=y", "", "-x", "--yes"] {
         assert!(
             overlays::enable(&f.root(), &names(&[bad])).is_err(),
             "{bad:?}"

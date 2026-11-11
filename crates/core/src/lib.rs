@@ -18,10 +18,12 @@ pub mod env;
 pub mod exec;
 pub mod kernel;
 pub mod migrate;
+pub mod out;
 pub mod overlays;
 pub mod plan;
 pub mod repack;
 pub mod root;
+pub mod signals;
 pub mod storage;
 
 pub use root::Root;
