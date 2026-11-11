@@ -13,6 +13,7 @@
 
 pub mod board;
 pub mod bootenv;
+pub mod bootinfo;
 pub mod bootloader;
 pub mod cpu;
 pub mod dpkg;
