@@ -239,7 +239,7 @@ fn migrate_refusals() {
     let err = migrate::plan(&f.root(), &mut ex, "/dev/sda", false)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("eMMC or NVMe only"), "{err}");
+    assert!(err.contains("eMMC, NVMe or USB only"), "{err}");
     // Too small.
     f.disk("mmcblk0", Some("MMC"), 2_000_000, &[]);
     let err = migrate::plan(&f.root(), &mut ex, "/dev/mmcblk0", false)

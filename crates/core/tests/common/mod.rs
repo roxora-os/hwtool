@@ -165,7 +165,8 @@ fn base(board: &str, env: &str) -> Fake {
         &fixture(&format!("armbian-release-{board}")),
     );
     f.write("/boot/armbianEnv.txt", env);
-    f.write("/boot/boot.cmd", "setenv overlay_error \"false\"\n");
+    // config/bootscripts/boot-rk3576.cmd at the pinned armbian/build commit.
+    f.write("/boot/boot.cmd", &fixture("boot-rk3576.cmd"));
     f.write("/boot/boot.scr", "script");
     f.write(&format!("/boot/vmlinuz-{EDGE_KERNEL}"), "kernel");
     f.link("/boot/Image", &format!("vmlinuz-{EDGE_KERNEL}"));
