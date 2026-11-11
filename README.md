@@ -1,7 +1,7 @@
 # hwtool
 
 hwtool changes the hardware settings of a board running a
-[Roxora](https://github.com/roxora-os/build) image. It does three things:
+[Roxora](https://github.com/roxora-os/build) image:
 
 1. **Device tree overlays**: list the overlays available for the board, show
    which are enabled, enable or disable them.
@@ -16,7 +16,18 @@ hwtool changes the hardware settings of a board running a
    level, console, splash, extra kernel arguments), checked.
 6. **CPU frequency**: governor and frequency range per CPU cluster,
    applied at every boot.
-7. **NPU**: show whether the NPU can run
+7. **Pin header**: I2C, SPI (with spidev), UART, PWM and 1-Wire on the
+   40-pin header, as overlays that hwtool ships and checks against the
+   board's device tree; functions that share pins are refused together.
+8. **Bootloader version and boot order**: the U-Boot version on SPI flash,
+   eMMC and SD compared with the installed package, an update of the device
+   the board starts from, and U-Boot's boot order where it can be saved.
+9. **LEDs, temperatures and fans**: LED triggers kept across reboots,
+   thermal zones, trip points and cooling devices.
+10. **Wi-Fi country**: the regulatory country, set now and at every boot.
+11. **Swap**: the swap file cloud-init makes at the first boot: show,
+    resize, remove, and `vm.swappiness`.
+12. **NPU**: show whether the NPU can run
    [charsiu](https://github.com/gahingwoo/charsiu) (the `rocket` driver, the
    NPU device tree nodes, `/dev/accel`), and install or remove charsiu
    (RK3576 only).
@@ -57,6 +68,21 @@ sudo hwtool boot write-bootloader --target spi
 sudo hwtool boot write-bootloader --target /dev/mmcblk0
 sudo hwtool boot migrate --target /dev/nvme0n1 --write-spi
 sudo hwtool boot migrate --target /dev/sda --write-spi   # USB drive, ROCK 4D
+hwtool interfaces list                       # 40-pin header functions and pins
+sudo hwtool interfaces enable i2c8-m2 spi1-m0
+sudo hwtool interfaces disable spi1-m0
+sudo hwtool boot version                     # U-Boot on SPI, eMMC, SD vs the package
+sudo hwtool boot update-bootloader           # only if the boot device differs
+sudo hwtool boot order show
+sudo hwtool boot order set nvme mmc0 mmc1    # ROCK 4D; or: boot order reset
+hwtool leds list
+sudo hwtool leds set green:status heartbeat
+hwtool fan show                              # temperatures, trip points, fans
+hwtool wifi country
+sudo hwtool wifi country DE
+hwtool swap show
+sudo hwtool swap set 2G                      # or: swap off
+sudo hwtool swap swappiness 20
 hwtool npu status
 sudo hwtool npu install-charsiu                # then: charsiu pull
 sudo hwtool npu remove-charsiu
@@ -82,7 +108,7 @@ Every command that changes something:
   the point of the command (`--allow-booted-device` for a bootloader update
   on the boot device; migration never writes to it).
 
-Overlay and kernel changes take effect after a reboot. `--json` gives
+Overlay, interface, kernel and boot order changes take effect after a reboot. `--json` gives
 machine-readable output; the GTK app uses it.
 
 ## Building
@@ -96,10 +122,12 @@ cargo build --release -p roxora-hwtool-gtk   # needs libgtk-4-dev
 packaging/build-debs.sh target output        # both .deb files into output/
 ```
 
-CI on GitHub Actions (`ubuntu-24.04-arm`) runs the tests, builds and installs
-both packages, starts the GTK app under Xvfb and saves screenshots, and runs
-a kernel branch switch with apt and dpkg in an Ubuntu 24.04 chroot
-(`tests/chroot/package-switch.sh`). Tags `v*` attach the packages to the
+CI on GitHub Actions (`ubuntu-24.04-arm`) runs the tests, checks every pin
+header overlay against the boards' DTBs (`tests/interfaces/check.py`: pin
+groups, `dtc -@`, `fdtoverlay`), builds and installs both packages, starts
+the GTK app under Xvfb and saves screenshots, and runs a kernel branch
+switch with apt and dpkg and a swap file with `mkswap` and `swapon` in an
+Ubuntu 24.04 chroot (`tests/chroot/package-switch.sh`). Tags `v*` attach the packages to the
 release.
 
 Writing the bootloader and moving the system need real hardware; the steps

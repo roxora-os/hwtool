@@ -216,10 +216,10 @@ policy0 for the four Cortex-A53, policy4 for the four Cortex-A72; the core
 names come from the CPU part in `/proc/cpuinfo`). `hwtool cpu set` accepts
 only governors from `scaling_available_governors` and frequencies from
 `scaling_available_frequencies`, writes `/etc/hwtool/cpufreq.conf`, installs
-and enables `hwtool-cpufreq.service` (a oneshot that runs `hwtool cpu apply`
-at boot), and writes the values to sysfs now (the maximum first when
-raising, the minimum first when lowering). `cpu reset` removes the file and
-the unit; the kernel's defaults return at the next boot. Roxora images drop
+and enables `hwtool-boot.service` (a oneshot that runs `hwtool apply` at
+boot, which applies the CPU and LED settings), and writes the values to sysfs now (the maximum first when
+raising, the minimum first when lowering). `cpu reset` removes the file, and
+the unit unless LED settings still need it; the kernel's defaults return at the next boot. Roxora images drop
 Armbian's `/etc/default/cpufrequtils` and `armbian-hardware-optimize`, so
 nothing else sets the governor. The `performance` governor, or a minimum at
 the top frequency, gets a warning about heat.
@@ -343,11 +343,165 @@ never downloads a model: `charsiu pull` does that. `remove-charsiu` is the
 same in reverse; downloaded models stay. A kernel switch to a vendor
 branch notes that an installed charsiu does not work there.
 
+## Pin header interfaces
+
+`data/interfaces/<board>/` holds one overlay source per function and an
+`index.json` with its pins, written by `tools/gen-interfaces.py` from these
+sources:
+
+- which RK3576 GPIO is on which header pin: Radxa's ROCK 4D page
+  (docs.radxa.com, rock4/rock4d/hardware-use/pin-gpio) and ArmSoM's CM5-IO
+  table (github.com/ArmSoM/documentation, `docs/main/ArmSoM Product/cm5.md`
+  at 90a836e7d7da);
+- which function a pin group carries, the order of its pins and the
+  controller node: the boards' DTBs from the Roxora images (kernel
+  7.3.4-edge-rockchip64), copied to `tests/interfaces/dtb/`;
+- which header pins the board uses itself: the enabled nodes of those DTBs
+  (ROCK 4D: pins 8 and 10 for the console UART0, 27 and 28 for I2C6 and the
+  board EEPROM; CM5-IO: 8 and 10 for the console, 16 and 18 for the
+  `gpio-leds` LEDs), and on the CM5-IO pin 28, which ArmSoM's table notes
+  shares the fan control signal.
+
+Radxa's table names several functions per pin; where its text is ambiguous
+the DTB's pin groups decide. Functions whose pins could not be confirmed in
+both sources are left out (on the CM5-IO only 10 functions remain, against
+20 on the ROCK 4D). `tests/interfaces/check.py` checks every entry: the pin
+groups exist and their pins, in order, are the GPIOs `index.json` puts on
+those header pins; the overlay compiles with `dtc -@` and applies with
+`fdtoverlay` to the board's DTB; in the result the controller is `okay` with
+the right `pinctrl-0`; no function uses a busy pin. CI runs it, and applies
+the installed `.dtbo` files again after the package is installed.
+
+Each overlay sets `pinctrl-0` and `status = "okay"` on the controller
+(`&i2c5`, `&spi1`, `&uart3`, `&pwm1_6ch_0`, ...). SPI overlays add
+`rockchip,spidev` children on each chip select, which the kernel's spidev
+driver (CONFIG_SPI_SPIDEV=m in the edge kernel) binds to `/dev/spidevB.C`.
+1-Wire adds a `w1-gpio` node on header pin 7 (CONFIG_W1_MASTER_GPIO=m) and
+needs an external pull-up of about 4.7 kOhm.
+
+`hwtool interfaces enable NAME` installs
+`/usr/share/hwtool/interfaces/<board>/NAME.dtbo` as
+`/boot/overlay-user/hwtool-NAME.dtbo` and adds `hwtool-NAME` to
+`user_overlays` in `armbianEnv.txt` (backed up first), which `boot.scr`
+applies at the next boot. It refuses two functions that share a pin or the
+same controller in another pin mux (`i2c8-m1` and `i2c8-m2`), whether they
+are enabled together or one is already on. `disable` removes both again.
+
+## Bootloader version and boot order
+
+U-Boot images carry their version as a string such as `U-Boot
+2026.04-armbian-... (Nov 10 2026 - 12:27:04 +0000)` (the SPL has its own,
+`U-Boot SPL ...`, which is skipped). `hwtool boot version` reads it from
+each SPI flash MTD device (the first 16 MiB) and from the start of each SD
+and eMMC device up to its first partition, which needs root, and from the
+installed package's `u-boot-rockchip.bin` and `u-boot-rockchip-spi.bin`.
+Each device is "up to date", "older", "newer" or "different" (compared by
+the release in the version string, then the whole string), or "none". The
+device the board starts from is the first that has U-Boot in the order
+SPI flash, eMMC, SD. `hwtool info` shows the same summary.
+
+`hwtool boot update-bootloader` writes the package's U-Boot to that device
+with the package's writer (see below), only when it differs, and with the
+same checks as `write-bootloader --allow-booted-device`.
+
+The boot order is U-Boot's `boot_targets` variable. hwtool changes it only
+where the U-Boot build keeps a writable environment, read from the package's
+`u-boot-config-target-*`: the ROCK 4D edge U-Boot has
+`CONFIG_ENV_IS_IN_SPI_FLASH=y`, `CONFIG_ENV_OFFSET=0xc00000`,
+`CONFIG_ENV_SIZE=0x20000` and no redundant copy. The CM5-IO build has no
+environment store, so U-Boot always uses its built-in order and hwtool says
+so. `boot order set` installs `libubootenv-tool` if needed, writes
+`/etc/hwtool/fw_env.config` for that location, and saves U-Boot's built-in
+environment (read from the package's SPI image, where it is stored as
+NUL-separated `key=value` strings) with only `boot_targets` changed, using
+`fw_setenv -s`. Every target must be one of the built-in ones
+(`mmc0 mmc1 scsi nvme usb pxe dhcp` on the ROCK 4D; in U-Boot's device tree
+`mmc0` is the SD card and `mmc1` the eMMC). `boot order reset` erases the
+saved environment with `flash_erase`, so the built-in one applies again.
+
+## LEDs
+
+`hwtool leds list` reads `/sys/class/leds/*/trigger` (the current trigger is
+the one in brackets). `leds set NAME TRIGGER` accepts only triggers that LED
+offers and writes it to sysfs now. The BSP's `armbian-led-state.service`
+saves every LED's trigger to `/etc/armbian-leds.conf` at shutdown and
+restores it at boot; hwtool does not add a second mechanism next to it: it
+sets `trigger=` in that LED's `[/sys/class/leds/NAME]` section of the same
+file (backed up first), so the setting also survives a power cut before
+the next clean shutdown. Without that service the trigger goes to
+`/etc/hwtool/leds.conf`, which `hwtool-boot.service` applies at boot.
+
+## Temperatures and fans
+
+`hwtool fan show` lists `/sys/class/thermal/thermal_zone*` with their
+temperatures and trip points, and the cooling devices. Neither board's
+device tree has a `pwm-fan` node (the CM5-IO's fan control signal, which
+ArmSoM's pinout mentions, has no fan driver in its DTB), and their cooling
+maps throttle the CPU and GPU. Trip
+points can be changed at run time only in kernels built with
+CONFIG_THERMAL_WRITABLE_TRIPS, which the edge kernel is not, so hwtool shows
+them and says why it cannot change them.
+
+## Wi-Fi country
+
+`hwtool wifi country` shows the country from `iw reg get`, including wiphys
+that manage their own rules. `wifi country XX` accepts ISO 3166-1 alpha-2
+codes (and 00), writes `options cfg80211 ieee80211_regdom=XX` to
+`/etc/modprobe.d/hwtool-wifi.conf` (for every later boot) and runs
+`iw reg set XX` now, installing `iw` first if it is missing.
+
+The ROCK 4D's Wi-Fi uses the aic8800 driver from the DKMS package
+`aic8800-usb` (module `aic8800_fdrv_usb`). Its source
+(`rwnx_mod_params.c`) turns its `custregd` parameter on by default: the
+wiphy is then `REGULATORY_WIPHY_SELF_MANAGED` with the driver's own
+permissive rules for its compiled-in country (`CONFIG_COUNTRY_CODE "00"`)
+and logs "CAUTION: USING PERMISSIVE CUSTOM REGULATORY RULES"; its
+`country_code` parameter is overwritten at load. So the cfg80211 setting
+does not reach it. `--aic8800-follow-country` also writes
+`options aic8800_fdrv_usb custregd=0`, which makes it leave the rules to
+cfg80211. That is opt-in because it has not been tried on a board.
+
+## Swap
+
+Roxora images get `/swap.img` at the first boot from cloud-init's mounts
+module (roxora-os/build `userpatches/roxora/cloud-init/99-roxora.cfg`:
+`swap: filename /swap.img, size auto`). cloud-init's `cc_mounts.py` writes
+the fstab line `/swap.img none swap sw 0 0`; cloud-init 24.1 adds
+`,comment=cloudconfig` to its options, 25.1 and later do not. When the
+module runs again (a new instance id) it drops every fstab line with
+`comment=cloudconfig` and appends its swap line for the file. hwtool writes
+the line with `comment=cloudconfig`, so cloud-init replaces it instead of
+adding a second one, and replaces cloud-init's line (with or without the
+comment) rather than adding its own.
+
+`hwtool swap show` reads `/proc/swaps` (what `swapon --show` prints),
+`/proc/meminfo`, the file and its fstab line, and whether zram is in use
+(the BSP's `armbian-zram-config.service`, enabled by default, puts swap on
+zram at priority 5; the swap file has a lower priority, so zram is used
+first). `swap set SIZE` (for example `2G` or `512M`, whole MiB):
+
+- refuses a file that does not fit, and, unless `--force`, one that leaves
+  less than a quarter of the root file system free or is more than twice the
+  memory; only ext4 and xfs root file systems are accepted;
+- if the file is in use, runs `swapoff` first, but only if the memory
+  available can take what is swapped out to it (plus 256 MiB); otherwise it
+  refuses and says how much is in use;
+- creates the file mode 600 (`install -m 0600 /dev/null`), `fallocate`s it,
+  runs `mkswap` and `swapon`, then writes fstab (backed up first). If a step
+  that makes the new file fails, the cleanup deletes the half-made file and
+  its fstab line.
+
+`swap off` runs `swapoff` (with the same memory check), removes the fstab
+line and deletes the file. `swap swappiness N` (0 to 200) sets
+`/proc/sys/vm/swappiness` now and writes
+`/etc/sysctl.d/60-hwtool-swap.conf`.
+
 ## The GTK app
 
-`hwtool-gtk` is a GTK 4 and libadwaita 1.5 app laid out like a GNOME
-Settings panel: pages Board, Overlays, Kernel, Storage and NPU, a bottom
-page switcher on narrow screens, destructive actions in their own groups,
+`hwtool-gtk` is a GTK 4 and libadwaita 1.5 app laid out like GNOME
+Settings: a sidebar with the pages Board, Overlays, Pin Header, Kernel,
+Boot, CPU, Memory, Devices and NPU (an AdwNavigationSplitView that shows one
+pane at a time on narrow screens), destructive actions in their own groups,
 confirmations as dialogs that show the plan, results as toasts, and a
 status page for boards it does not recognise. It runs as the user and
 refuses to run as root. It reads state
@@ -355,7 +509,9 @@ with `hwtool --json`, shows the output of `hwtool ... --dry-run` in a
 confirmation dialog, and runs the change with
 `pkexec /usr/bin/hwtool ... --yes --expect-plan <fingerprint>`, so what runs
 is what was confirmed. The polkit action `io.github.roxora_os.hwtool.run`
-asks for an administrator password. While a change runs, the pages are
+asks for an administrator password. The U-Boot versions on the boot
+devices are read the same way, after a Check button, because reading the
+devices needs root. While a change runs, the pages are
 insensitive, a banner says not to switch the board off, and the window
 cannot be closed. Names (overlays, branches) are passed after `--`.
 

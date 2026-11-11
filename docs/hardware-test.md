@@ -14,7 +14,9 @@ Notes for hwtool development:
   switch with apt and dpkg in an Ubuntu 24.04 chroot
   (`tests/chroot/package-switch.sh`, run as root), including a switch whose
   package fails and is rolled back.
-- Not covered without hardware: anything that boots, U-Boot writes to SD,
+- Not covered without hardware: anything that boots, the header
+  interfaces with real devices on the pins, the U-Boot environment and
+  boot order, LED triggers, the aic8800 `custregd=0` option, U-Boot writes to SD,
   eMMC and SPI flash, the migration, the pkexec and polkit prompt, and the
   U-Boot writer run as user nobody (CI runs the writer tests as a normal
   user).
