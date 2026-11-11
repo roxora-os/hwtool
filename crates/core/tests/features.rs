@@ -257,13 +257,10 @@ fn cpu_show_set_reset() {
     .unwrap();
     let text = p.render();
     assert!(
-        text.contains("$ systemctl enable hwtool-cpufreq.service"),
+        text.contains("$ systemctl enable hwtool-boot.service"),
         "{text}"
     );
-    assert!(
-        text.contains("ExecStart=/usr/bin/hwtool cpu apply"),
-        "{text}"
-    );
+    assert!(text.contains("ExecStart=/usr/bin/hwtool apply"), "{text}");
     let mut ex = RecordingExecutor::default();
     p.execute(&f.root(), &mut ex, "C").unwrap();
     assert_eq!(
@@ -319,13 +316,11 @@ fn cpu_show_set_reset() {
     }
     let text = cpu::reset_plan(&f.root()).unwrap().render();
     assert!(
-        text.contains("$ systemctl disable hwtool-cpufreq.service"),
+        text.contains("$ systemctl disable hwtool-boot.service"),
         "{text}"
     );
     assert!(
-        text.contains(
-            "$ rm -f /etc/hwtool/cpufreq.conf /etc/systemd/system/hwtool-cpufreq.service"
-        ),
+        text.contains("$ rm -f /etc/systemd/system/hwtool-boot.service"),
         "{text}"
     );
 }

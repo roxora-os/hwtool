@@ -21,6 +21,7 @@ pub mod env;
 pub mod exec;
 pub mod interfaces;
 pub mod kernel;
+pub mod leds;
 pub mod migrate;
 pub mod npu;
 pub mod out;

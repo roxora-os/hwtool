@@ -2,7 +2,8 @@
 //! Cortex-A72 and four Cortex-A53).
 //!
 //! Settings are kept in /etc/hwtool/cpufreq.conf and applied at boot by
-//! hwtool-cpufreq.service (`hwtool cpu apply`). Roxora images do not ship
+//! hwtool-boot.service (`hwtool apply`, which also applies
+//! /etc/hwtool/leds.conf). Roxora images do not ship
 //! Armbian's cpufrequtils defaults or armbian-hardware-optimize, so nothing
 //! else sets the governor.
 
@@ -14,8 +15,8 @@ use crate::root::Root;
 
 pub const CPUFREQ: &str = "/sys/devices/system/cpu/cpufreq";
 pub const CONF: &str = "/etc/hwtool/cpufreq.conf";
-pub const UNIT: &str = "/etc/systemd/system/hwtool-cpufreq.service";
-pub const UNIT_NAME: &str = "hwtool-cpufreq.service";
+pub const UNIT: &str = "/etc/systemd/system/hwtool-boot.service";
+pub const UNIT_NAME: &str = "hwtool-boot.service";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Policy {
@@ -119,7 +120,7 @@ pub fn parse_conf(text: &str) -> Vec<(String, Setting)> {
 
 fn render_conf(entries: &[(String, Setting)]) -> String {
     let mut s = String::from(
-        "# Written by hwtool cpu set; applied at boot by hwtool-cpufreq.service.\n\
+        "# Written by hwtool cpu set; applied at boot by hwtool-boot.service.\n\
          # One line per cpufreq policy: governor=, min= and max= in kHz.\n",
     );
     for (name, e) in entries {
@@ -190,19 +191,38 @@ pub fn status(root: &Root) -> Result<Status> {
 }
 
 fn unit() -> String {
-    format!(
-        "# Written by hwtool. Applies {CONF} at boot.\n\
-         [Unit]\n\
-         Description=Apply hwtool CPU frequency settings\n\
-         ConditionPathExists={CONF}\n\
-         \n\
-         [Service]\n\
-         Type=oneshot\n\
-         ExecStart=/usr/bin/hwtool cpu apply\n\
-         \n\
-         [Install]\n\
-         WantedBy=multi-user.target\n"
-    )
+    "# Written by hwtool. Applies /etc/hwtool/*.conf at boot.\n\
+     [Unit]\n\
+     Description=Apply hwtool settings (CPU frequency, LEDs)\n\
+     After=sysinit.target\n\
+     \n\
+     [Service]\n\
+     Type=oneshot\n\
+     ExecStart=/usr/bin/hwtool apply\n\
+     \n\
+     [Install]\n\
+     WantedBy=multi-user.target\n"
+        .to_string()
+}
+
+/// Add the steps that install and enable hwtool-boot.service, if it is not
+/// installed yet.
+pub fn ensure_boot_unit(root: &Root, p: &mut Plan) {
+    if root.exists(UNIT) {
+        return;
+    }
+    p.step(
+        format!("Write {UNIT}, which applies hwtool's settings at boot"),
+        Action::WriteFile {
+            path: UNIT.into(),
+            content: unit(),
+        },
+    );
+    p.run("Reload systemd", &["systemctl", "daemon-reload"]);
+    p.run(
+        format!("Enable {UNIT_NAME}"),
+        &["systemctl", "enable", UNIT_NAME],
+    );
 }
 
 /// Steps that write one policy's settings to sysfs now. Max before min when
@@ -372,45 +392,46 @@ pub fn set_plan(
 /// Remove hwtool's CPU settings. The current values stay until a reboot.
 pub fn reset_plan(root: &Root) -> Result<Plan> {
     let mut p = Plan::new("Remove hwtool's CPU frequency settings");
-    if !root.exists(CONF) && !root.exists(UNIT) {
+    if !root.exists(CONF) {
         p.notices
             .push("hwtool has no CPU frequency settings on this system.".into());
         return Ok(p);
     }
-    if root.exists(CONF) {
-        p.step(
-            format!("Back up {CONF}"),
-            Action::Backup { path: CONF.into() },
-        );
-    }
-    if root.exists(UNIT) {
+    p.step(
+        format!("Back up {CONF}"),
+        Action::Backup { path: CONF.into() },
+    );
+    p.run(format!("Remove {CONF}"), &["rm", "-f", CONF]);
+    // The unit stays while it still has something to apply (LEDs).
+    if root.exists(UNIT) && !root.exists(crate::leds::CONF) {
         p.run(
             format!("Disable {UNIT_NAME}"),
             &["systemctl", "disable", UNIT_NAME],
         );
+        p.run(format!("Remove {UNIT}"), &["rm", "-f", UNIT]);
+        p.run("Reload systemd", &["systemctl", "daemon-reload"]);
     }
-    p.run(
-        format!("Remove {CONF} and {UNIT}"),
-        &["rm", "-f", CONF, UNIT],
-    );
-    p.run("Reload systemd", &["systemctl", "daemon-reload"]);
     p.notices
         .push("The kernel's defaults apply again after the next reboot.".into());
     Ok(p)
 }
 
-/// Write the saved settings to sysfs (run at boot by the unit).
+/// Write the saved CPU and LED settings to sysfs (run at boot by the unit).
 pub fn apply_plan(root: &Root) -> Result<Plan> {
-    let st = status(root)?;
-    let mut p = Plan::new(format!("Apply {CONF}"));
-    for (name, s) in parse_conf(&root.read_opt(CONF).unwrap_or_default()) {
-        match st.policies.iter().find(|x| x.name == name) {
-            Some(pol) => apply_steps(&mut p, pol, &s),
-            None => p.warnings.push(format!(
-                "{CONF} names {name}, which this system does not have"
-            )),
+    let mut p = Plan::new("Apply hwtool's saved CPU and LED settings");
+    let conf = parse_conf(&root.read_opt(CONF).unwrap_or_default());
+    if !conf.is_empty() {
+        let st = status(root)?;
+        for (name, s) in conf {
+            match st.policies.iter().find(|x| x.name == name) {
+                Some(pol) => apply_steps(&mut p, pol, &s),
+                None => p.warnings.push(format!(
+                    "{CONF} names {name}, which this system does not have"
+                )),
+            }
         }
     }
+    crate::leds::apply_steps(root, &mut p);
     Ok(p)
 }
 
