@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, test and package (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libgtk-4-dev dpkg-dev xvfb xauth desktop-file-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit and fake-root tests
+        run: cargo test --workspace
+
+      - name: Build release binaries
+        run: cargo build --release --workspace
+
+      - name: Build the Debian packages
+        run: packaging/build-debs.sh target output
+
+      - name: Show the packages
+        run: |
+          for d in output/*.deb; do
+            echo "== $d"
+            dpkg-deb --info "$d"
+            dpkg-deb --contents "$d"
+          done
+
+      - name: Install the packages
+        run: |
+          sudo apt-get install -y -q ./output/roxora-hwtool_*.deb ./output/roxora-hwtool-gtk_*.deb
+          hwtool --version
+          hwtool --help
+          test -f /usr/share/polkit-1/actions/io.github.roxora_os.hwtool.policy
+          desktop-file-validate /usr/share/applications/io.github.roxora_os.HwTool.desktop
+
+      - name: Start the GTK app under Xvfb and take screenshots
+        env:
+          GSK_RENDERER: cairo
+        run: |
+          tests/gui/demo-root.sh "$RUNNER_TEMP/demo"
+          mkdir -p screenshots
+          for page in overlays kernel boot; do
+            HWTOOL_ROOT="$RUNNER_TEMP/demo" HWTOOL_GTK_PAGE="$page" \
+              HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/$page.png" \
+              timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" hwtool-gtk
+            test -s "screenshots/$page.png"
+          done
+          ls -l screenshots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs
+          path: output/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/*.png
+
+  chroot:
+    name: Kernel branch switch in an Ubuntu 24.04 chroot (arm64)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: debs
+          path: output
+      - name: Install debootstrap
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debootstrap dpkg-dev apt-utils
+      - name: Run the package switch test
+        run: sudo tests/chroot/package-switch.sh output/roxora-hwtool_*_arm64.deb
+
+  release:
+    name: Attach the packages to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, chroot]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: debs
+          path: output
+      - name: Check the tag matches the version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "hwtool ${GITHUB_REF_NAME#v}" \
+              --notes "Debian packages for arm64: roxora-hwtool (command line) and roxora-hwtool-gtk (GTK app)."
+          fi
+          gh release upload "$GITHUB_REF_NAME" output/*.deb --clobber
