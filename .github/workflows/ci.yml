@@ -71,9 +71,11 @@ jobs:
             HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/packaged-kernel.png" \
             timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" hwtool-gtk
           test -s screenshots/packaged-kernel.png
-          if sudo -E timeout 30 xvfb-run -a hwtool-gtk 2>root.txt; then
+          # The check comes before GTK starts, so no display is needed.
+          if sudo timeout 30 hwtool-gtk >root.txt 2>&1; then
             echo "hwtool-gtk ran as root"; exit 1
           fi
+          cat root.txt
           grep -q 'do not run this app as root' root.txt
 
       - name: Start the GTK app (test-hooks build) under Xvfb and take screenshots
