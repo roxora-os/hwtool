@@ -8,13 +8,15 @@
 //! the user confirmed. While a change runs the pages are insensitive, a
 //! banner says so, and the window cannot be closed.
 //!
-//! Uses libadwaita 1.5 (Ubuntu 24.04): AdwToolbarView, AdwViewSwitcher with
-//! a bottom AdwViewSwitcherBar below 550sp, AdwBanner, AdwToastOverlay,
-//! AdwPreferencesPage, AdwSwitchRow, AdwComboRow, AdwExpanderRow,
+//! Uses libadwaita 1.5 (Ubuntu 24.04), laid out like GNOME Settings: an
+//! AdwNavigationSplitView with the pages in a sidebar, collapsed to one
+//! pane below 550sp; AdwToolbarView, AdwBanner, AdwToastOverlay,
+//! AdwPreferencesPage, AdwSwitchRow, AdwComboRow, AdwSpinRow, AdwEntryRow,
 //! AdwStatusPage and AdwAlertDialog.
 //!
-//! Environment: HWTOOL_GTK_PAGE (board, overlays, kernel, boot, cpu or npu;
-//! "boot" is the Boot page: boot options, devices, bootloader, migration),
+//! Environment: HWTOOL_GTK_PAGE (board, overlays, interfaces, kernel, boot,
+//! cpu, memory, devices or npu; "boot" is the Boot page: boot options,
+//! devices, bootloader version and boot order, migration),
 //! HWTOOL_GTK_SIZE (WIDTHxHEIGHT), HWTOOL_GTK_DARK=1, HWTOOL_GTK_EXIT_AFTER_MS
 //! and HWTOOL_GTK_SCREENSHOT (save the window as PNG to that path, then
 //! quit). Built with the `test-hooks` feature only, for CI: HWTOOL_CLI,
@@ -57,6 +59,19 @@ const CSS: &str = "
   font-size: smaller;
 }
 ";
+
+/// Sidebar pages: name, title, icon.
+const PAGES: &[(&str, &str, &str)] = &[
+    ("board", "Board", "computer-symbolic"),
+    ("overlays", "Overlays", "view-list-symbolic"),
+    ("interfaces", "Pin Header", "input-dialpad-symbolic"),
+    ("kernel", "Kernel", "emblem-system-symbolic"),
+    ("boot", "Boot", "drive-harddisk-symbolic"),
+    ("cpu", "CPU", "power-profile-performance-symbolic"),
+    ("memory", "Memory", "drive-harddisk-system-symbolic"),
+    ("devices", "Devices", "preferences-other-symbolic"),
+    ("npu", "NPU", "applications-science-symbolic"),
+];
 
 struct Ctx {
     window: adw::ApplicationWindow,
@@ -165,7 +180,6 @@ fn build_ui(app: &adw::Application) {
         .unwrap_or((900, 700));
     let stack = adw::ViewStack::new();
     gtk::Window::set_default_icon_name(APP_ID);
-    let header = adw::HeaderBar::new();
     let menu = gio::Menu::new();
     menu.append(Some("About Hardware Tool"), Some("app.about"));
     let menu_button = gtk::MenuButton::builder()
@@ -174,23 +188,47 @@ fn build_ui(app: &adw::Application) {
         .tooltip_text("Main Menu")
         .primary(true)
         .build();
-    header.pack_end(&menu_button);
-    let switcher = adw::ViewSwitcher::builder()
-        .stack(&stack)
-        .policy(adw::ViewSwitcherPolicy::Wide)
+    // GNOME Settings layout: pages in a sidebar, the page beside it; below
+    // 550sp the sidebar and the page are shown one at a time.
+    let sidebar_header = adw::HeaderBar::new();
+    sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("Hardware Tool", "")));
+    sidebar_header.pack_end(&menu_button);
+    let list = gtk::ListBox::new();
+    list.add_css_class("navigation-sidebar");
+    let sidebar_view = adw::ToolbarView::new();
+    sidebar_view.add_top_bar(&sidebar_header);
+    sidebar_view.set_content(Some(
+        &gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&list)
+            .build(),
+    ));
+    let sidebar = adw::NavigationPage::builder()
+        .title("Hardware Tool")
+        .tag("sidebar")
+        .child(&sidebar_view)
         .build();
-    header.set_title_widget(Some(&switcher));
-    let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
+
     let banner = adw::Banner::new(
         "A change is running. Do not switch the board off and do not close this window.",
     );
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
     let view = adw::ToolbarView::new();
-    view.add_top_bar(&header);
+    view.add_top_bar(&adw::HeaderBar::new());
     view.add_top_bar(&banner);
     view.set_content(Some(&toasts));
-    view.add_bottom_bar(&switcher_bar);
+    let content = adw::NavigationPage::builder()
+        .title("Board")
+        .tag("content")
+        .child(&view)
+        .build();
+    let split = adw::NavigationSplitView::builder()
+        .sidebar(&sidebar)
+        .content(&content)
+        .min_sidebar_width(200.0)
+        .max_sidebar_width(260.0)
+        .build();
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -200,15 +238,12 @@ fn build_ui(app: &adw::Application) {
         .default_height(h)
         .width_request(360)
         .height_request(294)
-        .content(&view)
+        .content(&split)
         .build();
-    // Narrow windows: title in the header bar, page switcher at the bottom.
     let narrow = adw::Breakpoint::new(
         adw::BreakpointCondition::parse("max-width: 550sp").expect("valid breakpoint"),
     );
-    let title = adw::WindowTitle::new("Hardware Tool", "");
-    narrow.add_setter(&header, "title-widget", Some(&title.to_value()));
-    narrow.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
+    narrow.add_setter(&split, "collapsed", Some(&true.to_value()));
     window.add_breakpoint(narrow);
 
     let about = gio::SimpleAction::new("about", None);
@@ -238,18 +273,42 @@ fn build_ui(app: &adw::Application) {
         pkexec,
         pages: RefCell::new(Vec::new()),
     });
-    for (name, title, icon) in [
-        ("board", "Board", "computer-symbolic"),
-        ("overlays", "Overlays", "view-list-symbolic"),
-        ("kernel", "Kernel", "emblem-system-symbolic"),
-        ("boot", "Boot", "drive-harddisk-symbolic"),
-        ("cpu", "CPU", "power-profile-performance-symbolic"),
-        ("npu", "NPU", "applications-science-symbolic"),
-    ] {
+    for (name, title, icon_name) in PAGES {
         let holder = adw::Bin::new();
-        stack.add_titled_with_icon(&holder, Some(name), title, icon);
+        stack.add_titled(&holder, Some(name), title);
         ctx.pages.borrow_mut().push((name.to_string(), holder));
+        let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        b.append(&icon(icon_name));
+        b.append(&gtk::Label::builder().label(*title).xalign(0.0).build());
+        let r = gtk::ListBoxRow::builder().child(&b).build();
+        r.set_widget_name(name);
+        list.append(&r);
     }
+    let (stack2, content2, split2) = (stack.clone(), content.clone(), split.clone());
+    list.connect_row_activated(move |_, r| {
+        let name = r.widget_name();
+        stack2.set_visible_child_name(&name);
+        if let Some((_, t, _)) = PAGES.iter().find(|(n, _, _)| *n == name.as_str()) {
+            content2.set_title(t);
+        }
+        split2.set_show_content(true);
+    });
+    let select = {
+        let list = list.clone();
+        move |name: &str| {
+            let mut i = 0;
+            while let Some(r) = list.row_at_index(i) {
+                if r.widget_name() == name {
+                    list.select_row(Some(&r));
+                    r.emit_activate();
+                    return;
+                }
+                i += 1;
+            }
+        }
+    };
+    select("board");
+    split.set_show_content(false);
 
     // While a change runs the window stays open: closing it would leave the
     // change without anyone to show its result to.
@@ -269,7 +328,7 @@ fn build_ui(app: &adw::Application) {
 
     refresh(&ctx);
     if let Ok(p) = std::env::var("HWTOOL_GTK_PAGE") {
-        stack.set_visible_child_name(&p);
+        select(&p);
     }
     window.present();
     #[cfg(feature = "test-hooks")]
@@ -348,12 +407,26 @@ fn strip_prefix(e: &str) -> String {
 
 /// Show what `commands` would do, and run them after the user agrees.
 fn propose(ctx: &Shared, heading: &str, commands: Vec<Cmd>, destructive: bool) {
+    propose_or(ctx, heading, commands, destructive, || {});
+}
+
+/// [`propose`], calling `cancelled` when nothing runs (a switch or a choice
+/// that started it goes back).
+fn propose_or(
+    ctx: &Shared,
+    heading: &str,
+    commands: Vec<Cmd>,
+    destructive: bool,
+    cancelled: impl Fn() + 'static,
+) {
     if ctx.busy.get() {
         alert(ctx, "A Change Is Running", "Wait until it has finished.");
+        cancelled();
         return;
     }
     let mut text = String::new();
     let mut confirmed = Vec::new();
+    let mut reboot = false;
     for c in &commands {
         let mut a = vec!["--json".to_string()];
         a.extend(c.argv(&["--dry-run".to_string()]));
@@ -363,10 +436,12 @@ fn propose(ctx: &Shared, heading: &str, commands: Vec<Cmd>, destructive: bool) {
             Ok(v) => {
                 text.push_str(v["text"].as_str().unwrap_or(""));
                 let fp = v["fingerprint"].as_str().unwrap_or("").to_string();
+                reboot |= v["plan"]["reboot_required"].as_bool() == Some(true);
                 confirmed.push((c.clone(), fp));
             }
             Err(e) => {
                 alert(ctx, "Not Possible", &strip_prefix(&e));
+                cancelled();
                 return;
             }
         }
@@ -392,7 +467,9 @@ fn propose(ctx: &Shared, heading: &str, commands: Vec<Cmd>, destructive: bool) {
     let ctx2 = ctx.clone();
     dialog.connect_response(None, move |_, r| {
         if r == "apply" {
-            execute(&ctx2, confirmed.clone());
+            execute(&ctx2, confirmed.clone(), reboot);
+        } else {
+            cancelled();
         }
     });
     dialog.present(Some(&ctx.window));
@@ -428,7 +505,7 @@ fn set_busy(ctx: &Ctx, busy: bool) {
     ctx.banner.set_revealed(busy);
 }
 
-fn execute(ctx: &Shared, commands: Vec<(Cmd, String)>) {
+fn execute(ctx: &Shared, commands: Vec<(Cmd, String)>, reboot: bool) {
     let ctx = ctx.clone();
     set_busy(&ctx, true);
     glib::spawn_future_local(async move {
@@ -472,7 +549,11 @@ fn execute(ctx: &Shared, commands: Vec<(Cmd, String)>) {
         refresh(&ctx);
         if ok {
             let toast = adw::Toast::builder()
-                .title("Done. Reboot for the change to take effect.")
+                .title(if reboot {
+                    "Done. Reboot for the change to take effect."
+                } else {
+                    "Done."
+                })
                 .button_label("Details")
                 .timeout(8)
                 .build();
@@ -527,10 +608,8 @@ fn group(title: &str, description: Option<&str>) -> adw::PreferencesGroup {
 }
 
 fn row(title: &str, subtitle: &str) -> adw::ActionRow {
-    let r = adw::ActionRow::builder()
-        .title(title)
-        .use_markup(false)
-        .build();
+    let r = adw::ActionRow::builder().use_markup(false).build();
+    r.set_title(title);
     if !subtitle.is_empty() {
         r.set_subtitle(subtitle);
     }
@@ -540,11 +619,10 @@ fn row(title: &str, subtitle: &str) -> adw::ActionRow {
 /// A row that shows a value: dim title above, value below (GNOME Settings
 /// "About" style).
 fn info(title: &str, value: &str) -> adw::ActionRow {
-    let r = adw::ActionRow::builder()
-        .title(title)
-        .subtitle(value)
-        .use_markup(false)
-        .build();
+    // use_markup first: values such as a kernel command line contain "<".
+    let r = adw::ActionRow::builder().use_markup(false).build();
+    r.set_title(title);
+    r.set_subtitle(value);
     r.add_css_class("property");
     r
 }
@@ -569,10 +647,8 @@ fn action_row(
     label: &str,
     style: &str,
 ) -> (adw::ActionRow, gtk::Button) {
-    let r = adw::ActionRow::builder()
-        .title(title)
-        .use_markup(false)
-        .build();
+    let r = adw::ActionRow::builder().use_markup(false).build();
+    r.set_title(title);
     if !subtitle.is_empty() {
         r.set_subtitle(subtitle);
     }
@@ -701,9 +777,12 @@ fn device_rows(g: &adw::PreferencesGroup, boot: &Value) {
 fn refresh(ctx: &Shared) {
     board_page(ctx);
     overlays_page(ctx);
+    interfaces_page(ctx);
     kernel_page(ctx);
     boot_page(ctx);
     cpu_page(ctx);
+    memory_page(ctx);
+    devices_page(ctx);
     npu_page(ctx);
 }
 
@@ -1436,6 +1515,8 @@ fn boot_page(ctx: &Shared) {
         page.add(&g);
     }
 
+    bootloader_groups(ctx, &page);
+
     let disks = st["disks"].as_array().cloned().unwrap_or_default();
     let spi = st["spi"].as_array().cloned().unwrap_or_default();
 
@@ -1698,4 +1779,655 @@ fn npu_page(ctx: &Shared) {
     }
     page.add(&g);
     show(&holder, &page);
+}
+
+/// Read state that needs root (the boot media) through pkexec, then call
+/// `done` with hwtool's JSON.
+fn privileged_json(
+    ctx: &Shared,
+    args: &[&str],
+    done: impl FnOnce(Result<Value, String>) + 'static,
+) {
+    let mut argv: Vec<String> = Vec::new();
+    if ctx.pkexec {
+        argv.push("pkexec".into());
+    }
+    argv.extend(base_args(ctx));
+    argv.push("--json".into());
+    argv.extend(args.iter().map(|s| s.to_string()));
+    glib::spawn_future_local(async move {
+        let os: Vec<&OsStr> = argv.iter().map(OsStr::new).collect();
+        let r = match gio::Subprocess::newv(
+            &os,
+            gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_PIPE,
+        ) {
+            Err(e) => Err(e.to_string()),
+            Ok(p) => match p.communicate_utf8_future(None).await {
+                Err(e) => Err(e.to_string()),
+                Ok((out, _)) if p.exit_status() == 0 => {
+                    serde_json::from_str(out.as_deref().unwrap_or("")).map_err(|e| e.to_string())
+                }
+                Ok((_, err)) => Err(strip_prefix(err.as_deref().unwrap_or("").trim())),
+            },
+        };
+        done(r);
+    });
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn note_row(text: &str) -> adw::ActionRow {
+    let r = row(text, "");
+    r.set_title_lines(0);
+    r.add_prefix(&icon("dialog-information-symbolic"));
+    r
+}
+
+// ---- pin header -----------------------------------------------------------
+
+fn interfaces_page(ctx: &Shared) {
+    let holder = page_holder(ctx, "interfaces");
+    let st = match json(ctx, &["interfaces", "list"]) {
+        Ok(v) => v,
+        Err(e) => {
+            show(&holder, &error_page(&e));
+            return;
+        }
+    };
+    let page = adw::PreferencesPage::new();
+    let list = st["interfaces"].as_array().cloned().unwrap_or_default();
+    let intro = group(
+        "",
+        Some("Functions of the 40-pin header. Each one is a device tree overlay that boot.scr applies at the next boot. Functions that share pins cannot be on together."),
+    );
+    page.add(&intro);
+    for (kind, title) in [
+        ("i2c", "I2C"),
+        ("spi", "SPI"),
+        ("uart", "UART"),
+        ("pwm", "PWM"),
+        ("w1", "1-Wire"),
+    ] {
+        let items: Vec<&Value> = list.iter().filter(|i| s(i, "kind") == kind).collect();
+        if items.is_empty() {
+            continue;
+        }
+        let g = group(title, None);
+        for i in items {
+            let name = s(i, "name").to_string();
+            let pins: Vec<String> = i["pins"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|p| format!("{} {}", p["pin"].as_u64().unwrap_or(0), s(p, "signal")))
+                .collect();
+            let blocked: Vec<String> = strings(&i["blocked_by"])
+                .iter()
+                .map(|b| {
+                    list.iter()
+                        .find(|o| s(o, "name") == b)
+                        .map(|o| s(o, "title").to_string())
+                        .unwrap_or_else(|| b.clone())
+                })
+                .collect();
+            let on = i["enabled"].as_bool() == Some(true);
+            let mut sub = format!("Pins {}", pins.join(", "));
+            if !blocked.is_empty() && !on {
+                sub.push_str(&format!("\nIn use by {}", blocked.join(", ")));
+            }
+            let r = adw::SwitchRow::builder()
+                .title(s(i, "title"))
+                .subtitle(&sub)
+                .subtitle_lines(0)
+                .use_markup(false)
+                .active(on)
+                .sensitive(on || blocked.is_empty())
+                .build();
+            let ctx2 = ctx.clone();
+            r.connect_active_notify(move |r| {
+                let want = r.is_active();
+                if want == on {
+                    return;
+                }
+                let mut c = Cmd::new(&["interfaces", if want { "enable" } else { "disable" }]);
+                c.names.push(name.clone());
+                let r2 = r.clone();
+                propose_or(
+                    &ctx2,
+                    if want {
+                        "Turn On This Function?"
+                    } else {
+                        "Turn Off This Function?"
+                    },
+                    vec![c],
+                    false,
+                    move || r2.set_active(on),
+                );
+            });
+            g.add(&r);
+        }
+        page.add(&g);
+    }
+    let busy = st["busy"].as_array().cloned().unwrap_or_default();
+    if !busy.is_empty() {
+        let g = group(
+            "Used by the Board",
+            Some("These pins are taken by the board itself and are not offered."),
+        );
+        for b in busy {
+            let pin = b[0].as_u64().unwrap_or(0);
+            g.add(&info(&format!("Pin {pin}"), b[1].as_str().unwrap_or("")));
+        }
+        page.add(&g);
+    }
+    show(&holder, &page);
+}
+
+// ---- memory ---------------------------------------------------------------
+
+fn memory_page(ctx: &Shared) {
+    let holder = page_holder(ctx, "memory");
+    let st = match json(ctx, &["swap", "show"]) {
+        Ok(v) => v,
+        Err(e) => {
+            show(&holder, &error_page(&e));
+            return;
+        }
+    };
+    let page = adw::PreferencesPage::new();
+    let g = group("Memory", None);
+    g.add(&info("Installed", &size(&st["mem_total_bytes"])));
+    g.add(&info("Available now", &size(&st["mem_available_bytes"])));
+    page.add(&g);
+
+    let g = group(
+        "Swap",
+        Some("Swap in use now. zram keeps compressed memory in memory and is used before the swap file."),
+    );
+    let active = st["active"].as_array().cloned().unwrap_or_default();
+    if active.is_empty() {
+        g.add(&row("No swap in use", ""));
+    }
+    for a in &active {
+        let name = s(a, "name");
+        let r = row(
+            if name.starts_with("/dev/zram") {
+                "Compressed memory (zram)"
+            } else {
+                name
+            },
+            &format!(
+                "{}, {} used, priority {}",
+                size(&a["size_bytes"]),
+                size(&a["used_bytes"]),
+                a["priority"].as_i64().unwrap_or(0)
+            ),
+        );
+        g.add(&r);
+    }
+    page.add(&g);
+
+    let file = s(&st, "file").to_string();
+    let exists = st["file_bytes"].is_u64();
+    let g = group(
+        "Swap File",
+        Some(&format!(
+            "{file}, made by cloud-init at the first boot. The size can be up to twice the memory and must leave a quarter of the system drive free."
+        )),
+    );
+    g.add(&info(
+        "Size",
+        &if exists {
+            size(&st["file_bytes"])
+        } else {
+            "No swap file".into()
+        },
+    ));
+    let mem = st["mem_total_bytes"].as_u64().unwrap_or(0);
+    let mut choices: Vec<u64> = [256u64, 512, 1024, 2048, 4096, 8192]
+        .iter()
+        .map(|m| m << 20)
+        .filter(|b| mem == 0 || *b <= 2 * mem)
+        .collect();
+    if let Some(cur) = st["file_bytes"].as_u64() {
+        if !choices.contains(&cur) {
+            choices.push(cur);
+            choices.sort();
+        }
+    }
+    let labels: Vec<String> = choices.iter().map(|b| size(&Value::from(*b))).collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let combo = adw::ComboRow::builder()
+        .title(if exists { "New size" } else { "Size" })
+        .model(&gtk::StringList::new(&refs))
+        .selected(
+            st["file_bytes"]
+                .as_u64()
+                .and_then(|c| choices.iter().position(|b| *b == c))
+                .or_else(|| choices.iter().position(|b| *b == 1 << 30))
+                .unwrap_or(0) as u32,
+        )
+        .build();
+    g.add(&combo);
+    let (r, b) = action_row(
+        if exists {
+            "Resize the swap file"
+        } else {
+            "Make a swap file"
+        },
+        "Now and at every boot",
+        if exists { "Resize" } else { "Make" },
+        "",
+    );
+    g.add(&r);
+    let ctx2 = ctx.clone();
+    b.connect_clicked(move |_| {
+        if let Some(bytes) = choices.get(combo.selected() as usize) {
+            let c = Cmd::new(&["swap", "set", &format!("{}M", bytes >> 20)]);
+            propose(&ctx2, "Change the Swap File?", vec![c], false);
+        }
+    });
+    if exists || !st["fstab_line"].is_null() {
+        let (r, b) = action_row(
+            "Remove the swap file",
+            "Stops swapping to it and deletes it",
+            "Remove",
+            "destructive-action",
+        );
+        g.add(&r);
+        let ctx2 = ctx.clone();
+        b.connect_clicked(move |_| {
+            propose(
+                &ctx2,
+                "Remove the Swap File?",
+                vec![Cmd::new(&["swap", "off"])],
+                true,
+            );
+        });
+    }
+    page.add(&g);
+
+    if let Some(cur) = st["swappiness"].as_u64() {
+        let g = group(
+            "Swappiness",
+            Some("How readily the kernel moves memory to swap, 0 to 200. The default is 60."),
+        );
+        let spin = adw::SpinRow::with_range(0.0, 200.0, 10.0);
+        spin.set_title("vm.swappiness");
+        spin.set_value(cur as f64);
+        g.add(&spin);
+        let (r, b) = action_row("Apply", "Now and at every boot", "Apply", "");
+        g.add(&r);
+        let ctx2 = ctx.clone();
+        b.connect_clicked(move |_| {
+            let v = (spin.value() as u32).to_string();
+            propose(
+                &ctx2,
+                "Change the Swappiness?",
+                vec![Cmd::new(&["swap", "swappiness", &v])],
+                false,
+            );
+        });
+        page.add(&g);
+    }
+    show(&holder, &page);
+}
+
+// ---- devices: LEDs, Wi-Fi, temperatures -----------------------------------------
+
+fn devices_page(ctx: &Shared) {
+    let holder = page_holder(ctx, "devices");
+    let page = adw::PreferencesPage::new();
+    match json(ctx, &["leds", "list"]) {
+        Ok(st) => {
+            let g = group(
+                "LEDs",
+                Some(if st["armbian_led_state"].as_bool() == Some(true) {
+                    "What makes each LED light up. Kept across reboots by armbian-led-state."
+                } else {
+                    "What makes each LED light up. Kept across reboots by hwtool."
+                }),
+            );
+            for l in st["leds"].as_array().cloned().unwrap_or_default() {
+                let name = s(&l, "name").to_string();
+                let triggers = strings(&l["triggers"]);
+                let refs: Vec<&str> = triggers.iter().map(String::as_str).collect();
+                let cur = triggers
+                    .iter()
+                    .position(|t| t == s(&l, "trigger"))
+                    .unwrap_or(0) as u32;
+                let combo = adw::ComboRow::builder()
+                    .title(&name)
+                    .use_markup(false)
+                    .model(&gtk::StringList::new(&refs))
+                    .enable_search(triggers.len() > 8)
+                    .selected(cur)
+                    .build();
+                let ctx2 = ctx.clone();
+                combo.connect_selected_notify(move |c| {
+                    if c.selected() == cur {
+                        return;
+                    }
+                    let Some(t) = triggers.get(c.selected() as usize) else {
+                        return;
+                    };
+                    let mut cmd = Cmd::new(&["leds", "set"]);
+                    cmd.names = vec![name.clone(), t.clone()];
+                    let c2 = c.clone();
+                    propose_or(&ctx2, "Change the LED?", vec![cmd], false, move || {
+                        c2.set_selected(cur)
+                    });
+                });
+                g.add(&combo);
+            }
+            page.add(&g);
+        }
+        Err(e) => {
+            let g = group("LEDs", None);
+            g.add(&note_row(&strip_prefix(&e)));
+            page.add(&g);
+        }
+    }
+
+    if let Ok(st) = json(ctx, &["wifi", "country"]) {
+        let g = group(
+            "Wi-Fi Country",
+            Some("The country whose radio rules Wi-Fi follows: a two-letter ISO 3166 code such as DE or US."),
+        );
+        g.add(&info(
+            "In use",
+            st["country"]
+                .as_str()
+                .unwrap_or("Unknown (iw is not installed)"),
+        ));
+        let entry = adw::EntryRow::builder()
+            .title("Country code")
+            .text(st["configured"].as_str().unwrap_or(""))
+            .show_apply_button(true)
+            .build();
+        g.add(&entry);
+        let aic = st["aic8800"].as_bool() == Some(true);
+        let follow = adw::SwitchRow::builder()
+            .title("Let the Wi-Fi driver follow it")
+            .subtitle("The aic8800 driver otherwise uses its own permissive rules. Not yet tried on a board.")
+            .active(st["aic8800_follows_country"].as_bool() == Some(true))
+            .build();
+        if aic {
+            g.add(&follow);
+        }
+        let ctx2 = ctx.clone();
+        entry.connect_apply(move |e| {
+            let code = e.text().to_uppercase();
+            let mut c = Cmd::new(&["wifi", "country"]);
+            if aic && follow.is_active() {
+                c.args.push("--aic8800-follow-country".into());
+            }
+            c.names.push(code);
+            propose(&ctx2, "Set the Wi-Fi Country?", vec![c], false);
+        });
+        for n in strings(&st["notes"]) {
+            if !(aic && n.contains("aic8800")) {
+                g.add(&note_row(&n));
+            }
+        }
+        page.add(&g);
+    }
+
+    if let Ok(st) = json(ctx, &["fan", "show"]) {
+        let g = group("Temperatures", None);
+        for z in st["zones"].as_array().cloned().unwrap_or_default() {
+            let trips: Vec<String> = z["trips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|t| {
+                    format!(
+                        "{} at {:.0} °C",
+                        s(t, "kind"),
+                        t["temp_mc"].as_i64().unwrap_or(0) as f64 / 1000.0
+                    )
+                })
+                .collect();
+            let r = row(
+                &zone_name(s(&z, "kind")),
+                &if trips.is_empty() {
+                    String::new()
+                } else {
+                    format!("Trips: {}", trips.join(", "))
+                },
+            );
+            r.set_subtitle_lines(0);
+            r.add_suffix(&gtk::Label::new(Some(
+                &z["temp_mc"]
+                    .as_i64()
+                    .map(|t| format!("{:.1} °C", t as f64 / 1000.0))
+                    .unwrap_or_else(|| "unknown".into()),
+            )));
+            g.add(&r);
+        }
+        page.add(&g);
+        let g = group("Cooling", None);
+        g.add(&info(
+            "Fan",
+            if st["fan"].as_bool() == Some(true) {
+                "Yes"
+            } else {
+                "None"
+            },
+        ));
+        for n in strings(&st["notes"]) {
+            g.add(&note_row(&n));
+        }
+        page.add(&g);
+    }
+    show(&holder, &page);
+}
+
+// ---- boot page: U-Boot versions and boot order ---------------------------------
+
+fn media_name(m: &Value) -> String {
+    let dev = s(m, "device");
+    match s(m, "kind") {
+        "spi" => format!("SPI flash ({dev})"),
+        k => format!("{} ({dev})", kind_name(k)),
+    }
+}
+
+/// Fill `g` with the versions; returns the rows added.
+fn version_rows(ctx: &Shared, g: &adw::PreferencesGroup, v: &Value) -> Vec<gtk::Widget> {
+    let mut rows: Vec<gtk::Widget> = Vec::new();
+    let r = info(
+        "In the U-Boot package",
+        v["package"].as_str().unwrap_or("no version found"),
+    );
+    g.add(&r);
+    rows.push(r.upcast());
+    let starts = v["starts_from"].as_str().unwrap_or("");
+    for m in v["media"].as_array().cloned().unwrap_or_default() {
+        let state = s(&m, "state");
+        let r = row(
+            &media_name(&m),
+            m["version"]
+                .as_str()
+                .unwrap_or(if state == "none" { "No U-Boot" } else { "" }),
+        );
+        r.set_subtitle_lines(0);
+        if s(&m, "device") == starts {
+            r.add_suffix(&tag("Starts here", ""));
+        }
+        let (label, kind) = match state {
+            "up to date" => ("Up to date", "success"),
+            "older" => ("Older", "warning"),
+            "newer" => ("Newer", ""),
+            "different" => ("Different", "warning"),
+            "none" => ("", ""),
+            _ => ("Needs administrator", ""),
+        };
+        if !label.is_empty() {
+            r.add_suffix(&tag(label, kind));
+        }
+        g.add(&r);
+        rows.push(r.upcast());
+    }
+    let start = v["media"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| s(m, "device") == starts);
+    if let Some(m) = start {
+        if matches!(s(&m, "state"), "older" | "newer" | "different") {
+            let (r, b) = action_row(
+                "Update the bootloader",
+                &format!("Writes the package's U-Boot to {}", media_name(&m)),
+                "Update",
+                "destructive-action",
+            );
+            g.add(&r);
+            rows.push(r.upcast());
+            let target = if s(&m, "kind") == "spi" {
+                "spi".to_string()
+            } else {
+                s(&m, "device").to_string()
+            };
+            let ctx2 = ctx.clone();
+            b.connect_clicked(move |_| {
+                let c = Cmd::new(&[
+                    "boot",
+                    "write-bootloader",
+                    "--target",
+                    &target,
+                    "--allow-booted-device",
+                ]);
+                propose(&ctx2, "Update the Bootloader?", vec![c], true);
+            });
+        }
+    }
+    rows
+}
+
+fn bootloader_groups(ctx: &Shared, page: &adw::PreferencesPage) {
+    if let Ok(v) = json(ctx, &["boot", "version"]) {
+        let g = group(
+            "Bootloader Version",
+            Some("The U-Boot on each boot device, compared with the installed U-Boot package."),
+        );
+        let rows = Rc::new(RefCell::new(version_rows(ctx, &g, &v)));
+        let unreadable = v["media"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|m| s(m, "state").starts_with("unreadable")));
+        if unreadable {
+            let (r, b) = action_row(
+                "Read the boot devices",
+                "Reading them needs the administrator password",
+                "Check",
+                "",
+            );
+            g.add(&r);
+            let (ctx2, g2) = (ctx.clone(), g.clone());
+            b.connect_clicked(move |_| {
+                let (ctx3, g3, rows3, r3) = (ctx2.clone(), g2.clone(), rows.clone(), r.clone());
+                privileged_json(&ctx2, &["boot", "version"], move |res| match res {
+                    Ok(v) => {
+                        for w in rows3.borrow_mut().drain(..) {
+                            g3.remove(&w);
+                        }
+                        g3.remove(&r3);
+                        *rows3.borrow_mut() = version_rows(&ctx3, &g3, &v);
+                    }
+                    Err(e) => alert(&ctx3, "Cannot Read the Boot Devices", &e),
+                });
+            });
+        }
+        page.add(&g);
+    }
+
+    let Ok(o) = json(ctx, &["boot", "order", "show"]) else {
+        return;
+    };
+    let g = group(
+        "Boot Order",
+        Some("The order in which U-Boot looks for a system to start. In U-Boot's device tree mmc0 is the SD card; mmc1 is the eMMC."),
+    );
+    let default = strings(&o["default"]);
+    g.add(&info("Built in", &default.join(", ")));
+    match o["writable"].as_str() {
+        None => {
+            g.add(&note_row(
+                o["reason"]
+                    .as_str()
+                    .unwrap_or("Not possible on this board."),
+            ));
+        }
+        Some(_) => {
+            if let Some(saved) = o["saved"].as_array() {
+                let saved: Vec<&str> = saved.iter().filter_map(Value::as_str).collect();
+                g.add(&info("Saved", &saved.join(", ")));
+            }
+            let refs: Vec<&str> = default.iter().map(String::as_str).collect();
+            let combo = adw::ComboRow::builder()
+                .title("Try first")
+                .model(&gtk::StringList::new(&refs))
+                .build();
+            g.add(&combo);
+            let (r, b) = action_row(
+                "Save the boot order",
+                "Saved in U-Boot's environment in SPI flash",
+                "Save",
+                "",
+            );
+            g.add(&r);
+            let ctx2 = ctx.clone();
+            let d2 = default.clone();
+            b.connect_clicked(move |_| {
+                let Some(first) = d2.get(combo.selected() as usize) else {
+                    return;
+                };
+                let mut c = Cmd::new(&["boot", "order", "set"]);
+                c.names.push(first.clone());
+                c.names.extend(d2.iter().filter(|t| *t != first).cloned());
+                propose(&ctx2, "Change the Boot Order?", vec![c], false);
+            });
+            let (r, b) = action_row(
+                "Use the built-in order",
+                "Erases U-Boot's saved environment",
+                "Reset",
+                "destructive-action",
+            );
+            g.add(&r);
+            let ctx2 = ctx.clone();
+            b.connect_clicked(move |_| {
+                propose(
+                    &ctx2,
+                    "Use the Built-In Boot Order?",
+                    vec![Cmd::new(&["boot", "order", "reset"])],
+                    true,
+                );
+            });
+        }
+    }
+    page.add(&g);
+}
+
+/// "bigcore-thermal" -> "Big CPU cores" (zone names of rk3576.dtsi).
+fn zone_name(kind: &str) -> String {
+    match kind.trim_end_matches("-thermal") {
+        "package" => "SoC".into(),
+        "bigcore" => "Big CPU cores".into(),
+        "littlecore" => "Little CPU cores".into(),
+        "gpu" => "GPU".into(),
+        "npu" => "NPU".into(),
+        "ddr" => "Memory".into(),
+        other => other.to_string(),
+    }
 }

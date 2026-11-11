@@ -27,7 +27,7 @@ console=both
 overlay_prefix=rockchip-rk3576
 rootdev=UUID=db9a14c3-db24-44e3-b7cc-062ae4e6a908
 rootfstype=ext4
-user_overlays=sample-sensor
+user_overlays=sample-sensor hwtool-i2c8-m2
 END
 : >"$r/boot/overlay-user/sample-sensor.dtbo"
 : >"$r/boot/overlay-user/sample-display.dtbo"
@@ -117,3 +117,67 @@ mkdir -p "$r/var/lib/dkms/aic8800-usb"
 echo "root:x:$(id -u):$(id -g)::/root:/bin/sh" >"$r/etc/passwd"
 echo "render:x:$(id -g):" >"$r/etc/group"
 echo 16777216 >"$r/sys/class/mtd/mtd0/size"
+echo 4096 >"$r/sys/class/mtd/mtd0/erasesize"
+
+# Pin header interfaces from data/interfaces, with I2C8 (M2) on.
+ifs="$r/usr/share/hwtool/interfaces/radxa-rock-4d"
+mkdir -p "$ifs"
+cp "$here/../../data/interfaces/radxa-rock-4d/index.json" "$ifs/"
+for f in "$here"/../../data/interfaces/radxa-rock-4d/*.dtso; do
+  : >"$ifs/$(basename "$f" .dtso).dtbo"
+done
+: >"$r/boot/overlay-user/hwtool-i2c8-m2.dtbo"
+
+# U-Boot version strings: the package has a newer build than SPI flash; the
+# SD card has the package's. The SPI image carries the default environment.
+new="U-Boot 2026.04-armbian-2026.04-S88dc-P1a2b-H7c3d-V1e2f-B9a8b-R448a (Nov 10 2026 - 12:27:04 +0000)"
+old="U-Boot 2025.10-armbian-2025.10-S1234-P5678-H9abc-Vdef0-B1234-R448a (Oct 01 2025 - 08:00:00 +0000)"
+env='arch=arm\0baudrate=1500000\0boot_targets=mmc0 mmc1 scsi nvme usb pxe dhcp\0bootcmd=bootflow scan -lb\0\0'
+ub="$r/usr/lib/linux-u-boot-edge-radxa-rock-4d"
+put() { printf "$2" | dd of="$1" bs=1 seek=$(($3)) conv=notrunc status=none; }
+for f in u-boot-rockchip.bin u-boot-rockchip-spi.bin; do put "$ub/$f" "$new\\0" 0x60000; done
+put "$ub/u-boot-rockchip-spi.bin" "\\0$env" 0x70000
+printf 'CONFIG_MTD=y\nCONFIG_ENV_IS_IN_SPI_FLASH=y\nCONFIG_ENV_OFFSET=0xc00000\nCONFIG_ENV_SIZE=0x20000\n' \
+  >"$ub/u-boot-config-target-1"
+mkdir -p "$r/dev"
+truncate -s 1M "$r/dev/mtd0" "$r/dev/mmcblk1" "$r/dev/mmcblk0"
+put "$r/dev/mtd0" "$old\\0" 0x60000
+put "$r/dev/mmcblk1" "$new\\0" 0x60000
+
+# LEDs and thermal zones as in rk3576-rock-4d.dtb; armbian-led-state keeps them.
+for l in "green:status:[none] timer heartbeat default-on mmc0 mmc1" \
+  "blue:heartbeat:none timer [heartbeat] default-on mmc0 mmc1"; do
+  d="$r/sys/class/leds/${l%:*}"
+  mkdir -p "$d"
+  echo "${l##*:}" >"$d/trigger"
+  echo 1 >"$d/brightness"
+  echo 1 >"$d/max_brightness"
+done
+mkdir -p "$r/lib/systemd/system"
+: >"$r/lib/systemd/system/armbian-led-state.service"
+n=0
+for z in package:46250:115000:critical bigcore:47100:85000:passive littlecore:45300:85000:passive gpu:44800:85000:passive; do
+  IFS=: read -r name t trip kind <<<"$z"
+  d="$r/sys/class/thermal/thermal_zone$n"
+  mkdir -p "$d"
+  echo "$name-thermal" >"$d/type"
+  echo "$t" >"$d/temp"
+  echo "$trip" >"$d/trip_point_0_temp"
+  echo "$kind" >"$d/trip_point_0_type"
+  chmod 0444 "$d/trip_point_0_temp"
+  n=$((n + 1))
+done
+d="$r/sys/class/thermal/cooling_device0"
+mkdir -p "$d"
+echo cpufreq-cpu0 >"$d/type"
+echo 0 >"$d/cur_state"
+echo 8 >"$d/max_state"
+
+# Memory and swap after the first boot: 4 GiB, zram and cloud-init's /swap.img.
+printf 'MemTotal:        3956800 kB\nMemFree:          812000 kB\nMemAvailable:    2861200 kB\n' >"$r/proc/meminfo"
+printf 'Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/zram0                              partition\t1978396\t\t10240\t\t5\n/swap.img                               file\t\t2097148\t\t0\t\t-2\n' >"$r/proc/swaps"
+truncate -s 2G "$r/swap.img"
+printf 'UUID=db9a14c3-db24-44e3-b7cc-062ae4e6a908 / ext4 defaults,commit=120,errors=remount-ro 0 1\n/swap.img\tnone\tswap\tsw\t0\t0\n' >"$r/etc/fstab"
+mkdir -p "$r/proc/sys/vm"
+echo 60 >"$r/proc/sys/vm/swappiness"
+: >"$r/lib/systemd/system/armbian-zram-config.service"
