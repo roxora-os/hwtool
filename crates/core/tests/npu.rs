@@ -152,12 +152,15 @@ fn install_plan_shows_apt_and_refuses_extra_packages() {
     let f = npu_board("okay");
     let mut ex = exec(POLICY);
     ex.answer(
-        "apt-get -s -y install charsiu",
+        "apt-get -s -y --no-install-recommends install charsiu",
         "Inst charsiu (0.1.0 Armbian:noble [arm64])\nConf charsiu (0.1.0 Armbian:noble [arm64])\n",
     );
     let p = npu::install_plan(&f.root(), &mut ex).unwrap();
     let text = p.render();
-    assert!(text.contains("$ apt-get install -y charsiu"), "{text}");
+    assert!(
+        text.contains("$ apt-get install -y --no-install-recommends charsiu"),
+        "{text}"
+    );
     assert!(
         text.contains("  Inst charsiu (0.1.0 Armbian:noble [arm64])"),
         "{text}"
@@ -167,7 +170,7 @@ fn install_plan_shows_apt_and_refuses_extra_packages() {
     assert!(!p.steps.iter().any(|s| matches!(&s.action, hwtool_core::plan::Action::Run { argv } if argv.iter().any(|a| a == "pull"))));
 
     ex.answer(
-        "apt-get -s -y install charsiu",
+        "apt-get -s -y --no-install-recommends install charsiu",
         "Inst whiptail (0.52 Ubuntu:24.04 [arm64])\nInst charsiu (0.1.0 Armbian:noble [arm64])\n",
     );
     let err = npu::install_plan(&f.root(), &mut ex)
@@ -175,7 +178,7 @@ fn install_plan_shows_apt_and_refuses_extra_packages() {
         .to_string();
     assert!(err.contains("would also do: Inst whiptail"), "{err}");
     ex.answer(
-        "apt-get -s -y install charsiu",
+        "apt-get -s -y --no-install-recommends install charsiu",
         "Remv foo [1]\nInst charsiu (0.1.0 Armbian:noble [arm64])\n",
     );
     assert!(npu::install_plan(&f.root(), &mut ex)
@@ -184,13 +187,16 @@ fn install_plan_shows_apt_and_refuses_extra_packages() {
         .contains("Remv foo"));
     // Executing runs apt and then shows the status.
     ex.answer(
-        "apt-get -s -y install charsiu",
+        "apt-get -s -y --no-install-recommends install charsiu",
         "Inst charsiu (0.1.0 Armbian:noble [arm64])\n",
     );
     let p = npu::install_plan(&f.root(), &mut ex).unwrap();
     ex.ran.clear();
     p.execute(&f.root(), &mut ex, "N").unwrap();
-    assert_eq!(ex.ran[0].join(" "), "apt-get install -y charsiu");
+    assert_eq!(
+        ex.ran[0].join(" "),
+        "apt-get install -y --no-install-recommends charsiu"
+    );
 }
 
 #[test]

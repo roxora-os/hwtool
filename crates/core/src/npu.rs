@@ -398,7 +398,16 @@ pub fn install_plan(root: &Root, exec: &mut dyn Executor) -> Result<Plan> {
              check that the repository is enabled and run apt-get update"
         );
     }
-    let sim = argv(&["apt-get", "-s", "-y", "install", "charsiu"]);
+    // Only charsiu: its Recommends (curl or wget, whiptail) are named in a
+    // notice instead of being pulled in.
+    let sim = argv(&[
+        "apt-get",
+        "-s",
+        "-y",
+        "--no-install-recommends",
+        "install",
+        "charsiu",
+    ]);
     let (lines, ops) = simulate(exec, &sim)?;
     let other: Vec<String> = ops
         .iter()
@@ -420,11 +429,25 @@ pub fn install_plan(root: &Root, exec: &mut dyn Executor) -> Result<Plan> {
         st.charsiu.candidate.as_deref().unwrap_or(""),
         st.charsiu.origin.as_deref().unwrap_or("apt")
     ));
-    p.run("Install charsiu", &["apt-get", "install", "-y", "charsiu"]);
+    p.run(
+        "Install charsiu",
+        &[
+            "apt-get",
+            "install",
+            "-y",
+            "--no-install-recommends",
+            "charsiu",
+        ],
+    );
     p.steps[0].details = lines;
     p.step("Show the NPU status", Action::NpuStatus);
     p.notices.push(
         "charsiu does not come with a model. Fetch one with 'charsiu pull' (no name opens a picker)."
+            .into(),
+    );
+    p.notices.push(
+        "charsiu recommends curl or wget (to fetch models) and whiptail (for its menus); hwtool \
+         installs charsiu alone. Install them with apt if they are missing."
             .into(),
     );
     if !st.ready {
