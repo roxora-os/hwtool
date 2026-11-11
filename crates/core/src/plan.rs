@@ -33,6 +33,17 @@ pub enum Action {
     /// Check that /boot/Image now points at a kernel whose version ends in
     /// `suffix` and that the device tree U-Boot loads exists.
     VerifyKernel { suffix: String },
+    /// Save an installed package as a .deb file in `dir` (see repack.rs).
+    SavePackage {
+        name: String,
+        version: String,
+        dir: String,
+        file: String,
+        from_cache: Option<String>,
+        installed_kib: u64,
+    },
+    /// Remove saved package sets in /var/lib/hwtool/packages except `keep`.
+    PruneSaved { keep: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -168,6 +179,31 @@ fn render_action(out: &mut String, action: &Action) {
                  {mount}/etc/fstab exists"
             );
         }
+        Action::SavePackage {
+            file,
+            from_cache,
+            installed_kib,
+            ..
+        } => match from_cache {
+            Some(c) => {
+                let _ = writeln!(out, "    copy {c} to {file}");
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "    rebuild the package from the dpkg database and its installed files \
+                     ({} MiB installed) into {file}",
+                    installed_kib.div_ceil(1024)
+                );
+            }
+        },
+        Action::PruneSaved { keep } => {
+            let _ = writeln!(
+                out,
+                "    remove the other package sets in {}, keep {keep}",
+                crate::repack::PACKAGES_DIR
+            );
+        }
         Action::VerifyKernel { suffix } => {
             let _ = writeln!(
                 out,
@@ -226,6 +262,14 @@ fn apply(root: &Root, exec: &mut dyn Executor, stamp: &str, action: &Action) -> 
         }
         Action::VerifyTarget { mount } => verify_target(root, exec, mount),
         Action::VerifyKernel { suffix } => crate::kernel::verify_installed(root, suffix),
+        Action::SavePackage {
+            name, version, dir, ..
+        } => {
+            let f = crate::repack::save(root, exec, name, version, dir)?;
+            eprintln!("    saved: {f}");
+            Ok(())
+        }
+        Action::PruneSaved { keep } => crate::repack::prune(root, keep),
     }
 }
 

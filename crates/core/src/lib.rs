@@ -20,6 +20,7 @@ pub mod kernel;
 pub mod migrate;
 pub mod overlays;
 pub mod plan;
+pub mod repack;
 pub mod root;
 pub mod storage;
 

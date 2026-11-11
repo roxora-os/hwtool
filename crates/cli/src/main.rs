@@ -198,7 +198,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             keep_old,
             change,
         }) => {
-            let p = kernel::switch_plan(&root, &mut exec, branch, *keep_old, &Default::default())?;
+            let p = kernel::switch_plan(&root, &mut exec, branch, *keep_old, None)?;
             apply(cli, &root, &mut exec, p, *change)
         }
         Command::Kernel(KernelCmd::Revert { keep_old, change }) => {
@@ -370,6 +370,9 @@ fn print_kernel(st: &kernel::Status) {
             h.from_branch.as_deref().unwrap_or("unknown"),
             h.to_branch
         );
+        for p in &h.saved {
+            println!("  saved for the revert: {}", p.file);
+        }
     }
 }
 

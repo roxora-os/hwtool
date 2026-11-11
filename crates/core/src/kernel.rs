@@ -8,11 +8,12 @@
 //! `/boot/dtb`. U-Boot packages conflict with each other (`armbian-u-boot`),
 //! so apt replaces the old one.
 //!
-//! The switch installs the new branch, checks that `/boot/Image` and the
-//! device tree are in place, then removes the old kernel packages and
-//! records the old versions so `kernel revert` can go back.
-
-use std::collections::BTreeMap;
+//! The switch first saves the packages it is about to replace as .deb files
+//! in /var/lib/hwtool/packages (repack.rs), installs the new branch, checks
+//! that `/boot/Image` and the device tree are in place, then removes the old
+//! kernel packages and records the old versions and saved files so
+//! `kernel revert` can go back even when the repository no longer offers
+//! the old packages.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ use crate::dpkg::{self, Package};
 use crate::env::BootEnv;
 use crate::exec::{argv, Executor};
 use crate::plan::{self, Action, Plan};
+use crate::repack::{self, SavedPackage, PACKAGES_DIR};
 use crate::root::Root;
 use crate::ENV_FILE;
 
@@ -33,6 +35,9 @@ pub struct HistoryEntry {
     pub from_branch: Option<String>,
     pub from_packages: Vec<Package>,
     pub to_branch: String,
+    /// The replaced packages, saved as .deb files.
+    #[serde(default)]
+    pub saved: Vec<SavedPackage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,14 +142,15 @@ fn policy(exec: &mut dyn Executor, pkg: &str) -> Result<dpkg::Policy> {
     Ok(dpkg::parse_policy(&out))
 }
 
-/// Plan a switch to `target`. `want` pins package versions (used by revert)
-/// when apt still offers them.
+/// Plan a switch to `target`. For a revert, `back` is the history entry of
+/// the switch being undone: its package versions are installed from apt if
+/// apt still offers them, otherwise from the .deb files saved then.
 pub fn switch_plan(
     root: &Root,
     exec: &mut dyn Executor,
     target: &str,
     keep_old: bool,
-    want: &BTreeMap<String, String>,
+    back: Option<&HistoryEntry>,
 ) -> Result<Plan> {
     let st = status(root)?;
     let board = &st.board;
@@ -177,12 +183,23 @@ pub fn switch_plan(
 
     let mut specs = Vec::new();
     let mut missing = Vec::new();
+    let mut from_saved = Vec::new();
     for pkg in &new {
         let p = policy(exec, pkg)?;
-        match (&p.candidate, want.get(pkg)) {
-            (_, Some(v)) if p.versions.contains(v) => specs.push(format!("{pkg}={v}")),
-            (Some(_), _) => specs.push(pkg.clone()),
-            (None, _) => missing.push(pkg.clone()),
+        let want = back.and_then(|h| h.from_packages.iter().find(|x| &x.name == pkg));
+        let saved = back
+            .and_then(|h| h.saved.iter().find(|x| &x.name == pkg))
+            .filter(|x| root.exists(&x.file));
+        match (want, saved, &p.candidate) {
+            (Some(w), _, _) if p.versions.contains(&w.version) => {
+                specs.push(format!("{pkg}={}", w.version))
+            }
+            (_, Some(f), _) => {
+                specs.push(f.file.clone());
+                from_saved.push(format!("{pkg} {} from {}", f.version, f.file));
+            }
+            (_, None, Some(_)) => specs.push(pkg.clone()),
+            (_, None, None) => missing.push(pkg.clone()),
         }
     }
     if !missing.is_empty() {
@@ -217,6 +234,42 @@ pub fn switch_plan(
         .filter(|p| !p.name.starts_with("linux-u-boot-"))
         .map(|p| p.name.clone())
         .collect();
+    let time = plan::utc_stamp();
+    let mut save_dir = format!("{PACKAGES_DIR}/{time}");
+    let mut n = 1;
+    while root.exists(&save_dir) {
+        save_dir = format!("{PACKAGES_DIR}/{time}-{n}");
+        n += 1;
+    }
+    // apt replaces the old U-Boot package; the kernel packages go too unless kept.
+    let to_save: Vec<&Package> = old
+        .iter()
+        .filter(|p| p.name.starts_with("linux-u-boot-") || !keep_old)
+        .collect();
+    let mut saved = Vec::new();
+    let mut save_steps = Vec::new();
+    for pkg in &to_save {
+        let sp = repack::plan_save(root, &pkg.name, &pkg.version, &save_dir)?;
+        saved.push(SavedPackage {
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            file: sp.file.clone(),
+        });
+        save_steps.push(plan::Step {
+            description: format!(
+                "Save {} {} for 'hwtool kernel revert'",
+                pkg.name, pkg.version
+            ),
+            action: Action::SavePackage {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                dir: save_dir.clone(),
+                file: sp.file,
+                from_cache: sp.from_cache,
+                installed_kib: sp.installed_kib,
+            },
+        });
+    }
 
     let env_text = root.read(ENV_FILE)?;
     let env = BootEnv::parse(&env_text);
@@ -235,6 +288,7 @@ pub fn switch_plan(
             path: ENV_FILE.into(),
         },
     );
+    p.steps.extend(save_steps);
     p.run("Refresh the package lists", &["apt-get", "update"]);
     let mut install = vec!["apt-get", "install", "-y"];
     install.extend(specs.iter().map(String::as_str));
@@ -265,10 +319,11 @@ pub fn switch_plan(
     }
     let mut history = read_history(root);
     history.push(HistoryEntry {
-        time: plan::utc_stamp(),
+        time,
         from_branch: st.current.clone(),
         from_packages: old.clone(),
         to_branch: target.to_string(),
+        saved: saved.clone(),
     });
     p.step(
         format!("Record the old branch in {HISTORY_FILE} for 'hwtool kernel revert'"),
@@ -277,18 +332,33 @@ pub fn switch_plan(
             content: serde_json::to_string_pretty(&history)? + "\n",
         },
     );
+    if !saved.is_empty() {
+        p.step(
+            "Remove the packages saved by earlier switches",
+            Action::PruneSaved {
+                keep: save_dir.clone(),
+            },
+        );
+    }
     if !old.is_empty() {
-        let mut back = vec![
+        let mut undo = vec![
             "apt-get".to_string(),
             "install".into(),
             "-y".into(),
             "--reinstall".into(),
+            "--allow-downgrades".into(),
         ];
-        back.extend(old.iter().map(|p| format!("{}={}", p.name, p.version)));
+        undo.extend(old.iter().map(|p| {
+            saved
+                .iter()
+                .find(|s| s.name == p.name)
+                .map(|s| s.file.clone())
+                .unwrap_or_else(|| format!("{}={}", p.name, p.version))
+        }));
         p.cleanup.push(plan::Step {
             description: "Reinstall the old packages so /boot points at the old kernel again"
                 .into(),
-            action: Action::Run { argv: back },
+            action: Action::Run { argv: undo },
         });
     }
     let overlays = env.list("overlays");
@@ -303,6 +373,11 @@ pub fn switch_plan(
         "The U-Boot on the boot device is not rewritten. To write the new {} run 'hwtool boot write-bootloader'.",
         board.uboot_package(target)
     ));
+    for f in &from_saved {
+        p.notices.push(format!(
+            "apt no longer offers this version; installing {f} (saved by the last switch)."
+        ));
+    }
     p.notices.push(format!(
         "To go back: 'hwtool kernel revert' (or 'hwtool kernel switch {from}')."
     ));
@@ -328,12 +403,7 @@ pub fn revert_plan(root: &Root, exec: &mut dyn Executor, keep_old: bool) -> Resu
             st.current.unwrap_or_else(|| "an unknown branch".into())
         );
     }
-    let want: BTreeMap<String, String> = last
-        .from_packages
-        .iter()
-        .map(|p| (p.name.clone(), p.version.clone()))
-        .collect();
-    let mut p = switch_plan(root, exec, &from, keep_old, &want)?;
+    let mut p = switch_plan(root, exec, &from, keep_old, Some(last))?;
     p.title = format!("Revert to kernel branch {from}");
     Ok(p)
 }

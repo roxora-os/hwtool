@@ -1,7 +1,5 @@
 mod common;
 
-use std::collections::BTreeMap;
-
 use anyhow::{bail, Result};
 use common::*;
 use hwtool_core::dpkg;
@@ -48,12 +46,28 @@ impl Executor for FakeApt<'_> {
             .as_slice()
         {
             ["apt-get", "update"] => Ok(()),
+            ["dpkg-deb", "--root-owner-group", "--build", staging, out] => {
+                assert!(std::path::Path::new(staging)
+                    .join("DEBIAN/control")
+                    .exists());
+                std::fs::write(out, "deb").unwrap();
+                Ok(())
+            }
             ["apt-get", "install", "-y", pkgs @ ..] => {
                 for spec in pkgs {
                     if spec.starts_with('-') {
                         continue;
                     }
                     let (name, ver) = match spec.split_once('=') {
+                        _ if spec.ends_with(".deb") => {
+                            assert!(self.f.p(spec).exists(), "{spec} does not exist");
+                            let base = spec.rsplit('/').next().unwrap();
+                            let mut it = base.split('_');
+                            (
+                                it.next().unwrap().to_string(),
+                                it.next().unwrap().to_string(),
+                            )
+                        }
                         Some((n, v)) => (n.to_string(), v.to_string()),
                         None => {
                             let v = self
@@ -156,7 +170,7 @@ fn switch_to_vendor_and_back() {
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
     };
-    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, &BTreeMap::new()).unwrap();
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     let text = plan.render();
     assert!(text.contains("$ apt-get install -y linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx linux-u-boot-radxa-rock-4d-vendor"), "{text}");
     assert!(
@@ -166,8 +180,28 @@ fn switch_to_vendor_and_back() {
     assert!(text.contains("| overlay_prefix=rk3576"), "{text}");
     assert!(plan.reboot_required);
 
+    for pkg in [
+        "linux-image-edge-rockchip64",
+        "linux-dtb-edge-rockchip64",
+        "linux-u-boot-radxa-rock-4d-edge",
+    ] {
+        assert!(
+            text.contains(&format!(
+                "Save {pkg} 26.11.0-trunk for 'hwtool kernel revert'"
+            )),
+            "{text}"
+        );
+    }
+    assert!(
+        text.contains("rebuild the package from the dpkg database"),
+        "{text}"
+    );
+
     apt.ran.clear();
     plan.execute(&f.root(), &mut apt, "T1").unwrap();
+    let repacked = apt.ran.iter().filter(|c| c.starts_with("dpkg-deb")).count();
+    assert_eq!(repacked, 3);
+    apt.ran.retain(|c| !c.starts_with("dpkg-deb"));
     assert_eq!(
         apt.ran,
         vec![
@@ -230,7 +264,7 @@ fn keep_old_keeps_kernel_packages() {
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
     };
-    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", true, &BTreeMap::new()).unwrap();
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", true, None).unwrap();
     assert!(!plan.render().contains("apt-get remove"));
 }
 
@@ -246,7 +280,7 @@ fn missing_packages_are_reported_before_anything_changes() {
         ],
         ran: vec![],
     };
-    let err = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, &BTreeMap::new())
+    let err = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("linux-u-boot-armsom-cm5-io-vendor"), "{err}");
@@ -265,7 +299,7 @@ fn board_prefix_is_kept_for_cm5() {
         ],
         ran: vec![],
     };
-    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, &BTreeMap::new()).unwrap();
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     plan.execute(&f.root(), &mut apt, "T").unwrap();
     assert!(f
         .read("/boot/armbianEnv.txt")
@@ -284,13 +318,13 @@ fn refuses_unsupported_and_same_branch() {
         ran: vec![],
     };
     assert!(
-        kernel::switch_plan(&f.root(), &mut apt, "current", false, &BTreeMap::new())
+        kernel::switch_plan(&f.root(), &mut apt, "current", false, None)
             .unwrap_err()
             .to_string()
             .contains("supports the kernel branches vendor, edge")
     );
     assert!(
-        kernel::switch_plan(&f.root(), &mut apt, "edge", false, &BTreeMap::new())
+        kernel::switch_plan(&f.root(), &mut apt, "edge", false, None)
             .unwrap_err()
             .to_string()
             .contains("already runs")
@@ -311,7 +345,7 @@ fn missing_device_tree_stops_before_old_kernel_is_removed() {
         available: VENDOR_PKGS.to_vec(),
         ran: vec![],
     };
-    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, &BTreeMap::new()).unwrap();
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     apt.ran.clear();
     let err = format!("{:#}", plan.execute(&f.root(), &mut apt, "T").unwrap_err());
     assert!(err.contains("rk3576-rock-4d-spi.dtb"), "{err}");
@@ -365,7 +399,7 @@ fn headers_follow_the_branch_when_installed() {
         available: avail,
         ran: vec![],
     };
-    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, &BTreeMap::new()).unwrap();
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
     let text = plan.render();
     assert!(
         text.contains("linux-u-boot-radxa-rock-4d-vendor linux-headers-vendor-rk35xx\n"),
@@ -382,4 +416,78 @@ fn headers_follow_the_branch_when_installed() {
         "{names:?}"
     );
     assert!(!names.iter().any(|n| n.contains("edge")), "{names:?}");
+}
+
+#[test]
+fn revert_uses_saved_packages_when_apt_no_longer_has_them() {
+    // Like the ArmSoM CM5-IO: the edge U-Boot package is not in the repository.
+    let f = cm5();
+    // apt still has the original U-Boot .deb in its cache: it is copied as is.
+    f.write(
+        "/var/cache/apt/archives/linux-u-boot-armsom-cm5-io-edge_26.11.0-trunk_arm64.deb",
+        "original",
+    );
+    let mut apt = FakeApt {
+        f: &f,
+        available: vec![
+            ("linux-image-vendor-rk35xx", "26.5.1"),
+            ("linux-dtb-vendor-rk35xx", "26.5.1"),
+            ("linux-u-boot-armsom-cm5-io-vendor", "26.5.1"),
+        ],
+        ran: vec![],
+    };
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, None).unwrap();
+    let text = plan.render();
+    assert!(text.contains("copy /var/cache/apt/archives/linux-u-boot-armsom-cm5-io-edge_26.11.0-trunk_arm64.deb to /var/lib/hwtool/packages/"), "{text}");
+    plan.execute(&f.root(), &mut apt, "T1").unwrap();
+    let st = kernel::status(&f.root()).unwrap();
+    let saved = &st.history[0].saved;
+    assert_eq!(saved.len(), 3);
+    let uboot = saved
+        .iter()
+        .find(|s| s.name == "linux-u-boot-armsom-cm5-io-edge")
+        .unwrap();
+    assert_eq!(f.read(&uboot.file), "original");
+
+    // Nothing for edge is offered by apt any more (the FakeApt still answers
+    // policy for edge packages with the trunk version, so drop that).
+    struct NoEdge<'a>(FakeApt<'a>);
+    impl Executor for NoEdge<'_> {
+        fn run(&mut self, a: &[String]) -> Result<()> {
+            self.0.run(a)
+        }
+        fn capture(&mut self, a: &[String]) -> Result<String> {
+            if a.len() == 3 && a[1] == "policy" && a[2].contains("edge") {
+                return Ok(policy(None, &[]));
+            }
+            self.0.capture(a)
+        }
+    }
+    let mut apt = NoEdge(apt);
+    let plan = kernel::revert_plan(&f.root(), &mut apt, false).unwrap();
+    let text = plan.render();
+    for s in saved {
+        assert!(text.contains(&s.file), "{text}");
+    }
+    assert!(text.contains("apt no longer offers this version"), "{text}");
+    apt.0.ran.clear();
+    plan.execute(&f.root(), &mut apt, "T2").unwrap();
+    assert_eq!(
+        kernel::status(&f.root()).unwrap().current.as_deref(),
+        Some("edge")
+    );
+    let names: Vec<String> = dpkg::installed(&f.root())
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(
+        names.contains(&"linux-u-boot-armsom-cm5-io-edge".to_string()),
+        "{names:?}"
+    );
+    // The revert saved the vendor packages and dropped the older set.
+    let sets = f.root().list_dir("/var/lib/hwtool/packages");
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    let hist = kernel::status(&f.root()).unwrap().history;
+    assert!(hist[1].saved.iter().all(|s| s.file.contains(&sets[0])));
+    assert!(hist[0].saved.iter().all(|s| !f.p(&s.file).exists()));
 }

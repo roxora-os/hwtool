@@ -60,6 +60,15 @@ impl Fake {
             ));
         }
         self.write("/var/lib/dpkg/status", &s);
+        // dpkg's file lists, so packages can be saved (repack.rs).
+        for (n, _) in pkgs {
+            let doc = format!("/usr/share/doc/{n}");
+            self.write(&format!("{doc}/copyright"), "test\n");
+            self.write(
+                &format!("/var/lib/dpkg/info/{n}.list"),
+                &format!("/.\n/usr\n/usr/share\n/usr/share/doc\n{doc}\n{doc}/copyright\n"),
+            );
+        }
     }
 
     /// A disk in sysfs. `parts` are (start sector, size sectors).
