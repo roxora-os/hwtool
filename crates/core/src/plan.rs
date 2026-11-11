@@ -50,6 +50,8 @@ pub enum Action {
     RestoreBackup { path: String },
     /// Print where /boot/Image, /boot/dtb and /boot/uInitrd point. Never fails.
     ReportBoot,
+    /// Print the NPU and charsiu status. Never fails.
+    NpuStatus,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -365,6 +367,9 @@ fn render_action(out: &mut String, action: &Action) {
                 "    show where /boot/Image, /boot/dtb and /boot/uInitrd point"
             );
         }
+        Action::NpuStatus => {
+            let _ = writeln!(out, "    show the rocket driver, /dev/accel and charsiu");
+        }
     }
 }
 
@@ -432,6 +437,10 @@ fn apply(root: &Root, exec: &mut dyn Executor, stamp: &str, action: &Action) -> 
                 .with_context(|| format!("no backup of {path} from this run"))?;
             write_file(root, path, &content)?;
             say(&format!("    restored {path} from {copy}"));
+            Ok(())
+        }
+        Action::NpuStatus => {
+            crate::npu::report(root, exec);
             Ok(())
         }
         Action::ReportBoot => {

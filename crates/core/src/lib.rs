@@ -18,6 +18,7 @@ pub mod env;
 pub mod exec;
 pub mod kernel;
 pub mod migrate;
+pub mod npu;
 pub mod out;
 pub mod overlays;
 pub mod plan;

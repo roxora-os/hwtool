@@ -501,6 +501,15 @@ pub fn switch_plan(
             overlays.join(" ")
         ));
     }
+    if target.starts_with("vendor") {
+        if let Some(c) = installed.iter().find(|p| p.name == "charsiu") {
+            p.notices.push(format!(
+                "charsiu {} is installed. It needs the edge kernel's rocket driver and will not \
+                 work on the {target} branch until you go back ('hwtool kernel revert').",
+                c.version
+            ));
+        }
+    }
     p.notices.push(format!(
         "The U-Boot on the boot device is not rewritten. To write the new {} run 'hwtool boot write-bootloader'.",
         board.uboot_package(target)

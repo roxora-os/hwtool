@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
-use hwtool_core::{kernel, migrate, overlays, Root};
+use hwtool_core::{kernel, migrate, npu, overlays, Root};
 
 // Output never panics: when the terminal or the pipe to the GTK app is
 // gone, writes fail quietly and the change runs to its end or its cleanup.
@@ -68,6 +68,25 @@ enum Command {
     /// Bootloader and system storage.
     #[command(subcommand)]
     Boot(BootCmd),
+    /// The NPU and charsiu, the LLM runtime for it.
+    #[command(subcommand)]
+    Npu(NpuCmd),
+}
+
+#[derive(Subcommand)]
+enum NpuCmd {
+    /// Show the NPU driver, device tree nodes, /dev/accel and charsiu.
+    Status,
+    /// Install charsiu from the Armbian repository (edge kernel only).
+    InstallCharsiu {
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Remove charsiu (downloaded models stay).
+    RemoveCharsiu {
+        #[command(flatten)]
+        change: Change,
+    },
 }
 
 #[derive(Subcommand)]
@@ -225,6 +244,23 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         }
         Command::Kernel(KernelCmd::Revert { keep_old, change }) => {
             let p = kernel::revert_plan(&root, &mut exec, *keep_old)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Npu(NpuCmd::Status) => {
+            let st = npu::status(&root, &mut exec)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                print_npu(&st);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Npu(NpuCmd::InstallCharsiu { change }) => {
+            let p = npu::install_plan(&root, &mut exec)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Npu(NpuCmd::RemoveCharsiu { change }) => {
+            let p = npu::remove_plan(&root, &mut exec)?;
             apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Boot(BootCmd::Status) => {
@@ -464,4 +500,68 @@ fn print_boot(st: &bootloader::Status) {
     for m in &st.missing {
         outln!("Not available: {m}");
     }
+}
+
+fn print_npu(st: &npu::Status) {
+    outln!("NPU: {}", st.verdict);
+    outln!(
+        "Kernel: {} (branch {})",
+        st.kernel.as_deref().unwrap_or("unknown"),
+        st.branch.as_deref().unwrap_or("unknown")
+    );
+    if let Some(r) = &st.running_kernel {
+        outln!("  running now: {r}");
+    }
+    for d in [&st.rocket, &st.rknpu] {
+        if d.available() || d.loaded {
+            outln!(
+                "Driver {}: {}{}{}",
+                d.name,
+                d.module_file.as_deref().unwrap_or(if d.builtin {
+                    "built in"
+                } else {
+                    "no module"
+                }),
+                if d.builtin && d.module_file.is_some() {
+                    ", built in"
+                } else {
+                    ""
+                },
+                if d.loaded { ", loaded" } else { ", not loaded" }
+            );
+        }
+    }
+    if !st.rocket.available() {
+        outln!("Driver rocket: not in this kernel");
+    }
+    if st.nodes.is_empty() {
+        outln!("Device tree: no NPU node");
+    }
+    for n in &st.nodes {
+        outln!(
+            "Device tree: {} {} ({})",
+            n.path,
+            n.compatible.join(" "),
+            n.status
+        );
+    }
+    if st.accel.is_empty() {
+        outln!("Device: no /dev/accel device");
+    }
+    for a in &st.accel {
+        outln!("Device: {} {} {}:{}", a.path, a.mode, a.owner, a.group);
+    }
+    outln!(
+        "charsiu: {}{}",
+        st.charsiu
+            .installed
+            .as_deref()
+            .map(|v| format!("{v} installed"))
+            .unwrap_or_else(|| "not installed".into()),
+        match (&st.charsiu.candidate, &st.charsiu.origin) {
+            (Some(c), Some(o)) => format!(", {c} available from {o}"),
+            (Some(c), None) => format!(", {c} available"),
+            _ => ", no package available".into(),
+        }
+    );
 }
