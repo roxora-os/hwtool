@@ -66,7 +66,8 @@ fn branch_packages(board: &Board, branch: &str) -> Vec<String> {
     ]
 }
 
-/// The branch packages plus headers, for showing what is installed.
+/// The branch packages plus headers, for showing what is installed
+/// (headers are optional, so they are not listed when missing).
 fn shown_packages(board: &Board, branch: &str) -> Vec<String> {
     let mut v = branch_packages(board, branch);
     v.push(board.headers_package(branch));
@@ -88,14 +89,14 @@ pub fn status(root: &Root) -> Result<Status> {
         .branches
         .iter()
         .map(|b| {
-            let packages = shown_packages(&board, b);
+            let shown = shown_packages(&board, b);
             BranchInfo {
                 installed: installed
                     .iter()
-                    .filter(|p| packages.contains(&p.name))
+                    .filter(|p| shown.contains(&p.name))
                     .cloned()
                     .collect(),
-                packages,
+                packages: branch_packages(&board, b),
                 branch: b.clone(),
             }
         })
