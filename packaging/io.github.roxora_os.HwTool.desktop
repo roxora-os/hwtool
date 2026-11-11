@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hardware Tool
+Comment=Device tree overlays, kernel branch and boot storage
+Exec=hwtool-gtk
+Icon=preferences-system
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=overlay;device tree;kernel;bootloader;U-Boot;eMMC;NVMe;

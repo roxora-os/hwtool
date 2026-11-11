@@ -1,0 +1,9 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: hwtool
+Source: https://github.com/roxora-os/hwtool
+
+Files: *
+Copyright: 2026 Ga Hing Woo <gahing@gahingwoo.com>
+License: GPL-2.0-only
+ On Debian and Ubuntu systems, the full text of the GNU General Public
+ License version 2 can be found in /usr/share/common-licenses/GPL-2.
