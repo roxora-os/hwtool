@@ -11,7 +11,9 @@ use clap::{Args, Parser, Subcommand};
 use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
-use hwtool_core::{bootenv, cpu, kernel, migrate, npu, overlays, Root};
+use hwtool_core::{
+    bootenv, bootinfo, cpu, interfaces, kernel, leds, migrate, npu, overlays, thermal, wifi, Root,
+};
 
 // Output never panics: when the terminal or the pipe to the GTK app is
 // gone, writes fail quietly and the change runs to its end or its cleanup.
@@ -77,6 +79,92 @@ enum Command {
     /// CPU frequency per cluster.
     #[command(subcommand)]
     Cpu(CpuCmd),
+    /// I2C, SPI, UART, PWM and 1-Wire on the 40-pin header.
+    #[command(subcommand)]
+    Interfaces(InterfacesCmd),
+    /// The board's LEDs and their triggers.
+    #[command(subcommand)]
+    Leds(LedsCmd),
+    /// Temperatures, trip points, cooling devices and fans.
+    #[command(subcommand)]
+    Fan(FanCmd),
+    /// Wi-Fi settings.
+    #[command(subcommand)]
+    Wifi(WifiCmd),
+    /// Apply hwtool's saved CPU and LED settings (run at boot by hwtool-boot.service).
+    #[command(hide = true)]
+    Apply,
+}
+
+#[derive(Subcommand)]
+enum InterfacesCmd {
+    /// List the header interfaces, their pins, state and conflicts.
+    List,
+    /// Enable interfaces (takes effect after a reboot).
+    Enable {
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Disable interfaces (takes effect after a reboot).
+    Disable {
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[command(flatten)]
+        change: Change,
+    },
+}
+
+#[derive(Subcommand)]
+enum LedsCmd {
+    /// List the LEDs, their trigger and the triggers they offer.
+    List,
+    /// Set an LED's trigger, now and at every boot.
+    Set {
+        name: String,
+        trigger: String,
+        #[command(flatten)]
+        change: Change,
+    },
+}
+
+#[derive(Subcommand)]
+enum FanCmd {
+    /// Show thermal zones, trip points, cooling devices and whether there is a fan.
+    Show,
+}
+
+#[derive(Subcommand)]
+enum WifiCmd {
+    /// Show the regulatory country, or set it (ISO 3166 code such as DE or US).
+    Country {
+        country: Option<String>,
+        /// Also make the aic8800 driver (ROCK 4D) follow the country instead
+        /// of its own permissive rules (custregd=0; not tried on hardware).
+        #[arg(long)]
+        aic8800_follow_country: bool,
+        #[command(flatten)]
+        change: Change,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrderCmd {
+    /// Show the boot order in U-Boot's environment.
+    Show,
+    /// Save a new boot order, for example: nvme mmc1 mmc0 usb.
+    Set {
+        #[arg(required = true)]
+        targets: Vec<String>,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Erase the saved environment, so U-Boot uses its built-in order.
+    Reset {
+        #[command(flatten)]
+        change: Change,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,7 +297,7 @@ enum CpuCmd {
         #[command(flatten)]
         change: Change,
     },
-    /// Apply /etc/hwtool/cpufreq.conf now (run at boot by hwtool-cpufreq.service).
+    /// The same as `hwtool apply` (kept for older hwtool-cpufreq.service units).
     #[command(hide = true)]
     Apply,
 }
@@ -218,6 +306,16 @@ enum CpuCmd {
 enum BootCmd {
     /// Show the U-Boot package, disks and SPI flash.
     Status,
+    /// Show the U-Boot version on SPI flash and SD/eMMC, compared with the package (needs root).
+    Version,
+    /// Write the package's U-Boot to the device the board starts from, if it differs.
+    UpdateBootloader {
+        #[command(flatten)]
+        change: Change,
+    },
+    /// The boot order in U-Boot's environment (where it has a writable one).
+    #[command(subcommand)]
+    Order(OrderCmd),
     /// Write U-Boot from the installed U-Boot package to SPI flash or an SD/eMMC device.
     WriteBootloader {
         /// `spi`, or a whole SD/eMMC device such as /dev/mmcblk0.
@@ -275,11 +373,13 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Info => {
             let k = kernel::status(&root);
             let b = bootloader::status(&root);
+            let v = bootinfo::versions(&root).ok();
             if cli.json {
                 print_json(&serde_json::json!({
                     "kernel": k.as_ref().ok(),
                     "kernel_error": k.as_ref().err().map(|e| format!("{e:#}")),
                     "boot": b,
+                    "bootloader_versions": v,
                 }))?;
             } else {
                 match &k {
@@ -288,6 +388,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 }
                 outln!();
                 print_boot(&b);
+                if let Some(v) = &v {
+                    outln!();
+                    print_versions(v);
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -441,8 +545,8 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             let p = cpu::reset_plan(&root)?;
             apply(cli, &root, &mut exec, p, change.clone())
         }
-        Command::Cpu(CpuCmd::Apply) => {
-            // Run by hwtool-cpufreq.service: applies what the user set before.
+        Command::Apply | Command::Cpu(CpuCmd::Apply) => {
+            // Run by hwtool-boot.service: applies what the user set before.
             let p = cpu::apply_plan(&root)?;
             let change = Change {
                 dry_run: false,
@@ -483,6 +587,157 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             change,
         }) => {
             let p = bootloader::write_plan(&root, &Target::parse(target)?, *allow_booted_device)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Boot(BootCmd::Version) => {
+            let v = bootinfo::versions(&root)?;
+            if cli.json {
+                print_json(&v)?;
+            } else {
+                print_versions(&v);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Boot(BootCmd::UpdateBootloader { change }) => {
+            let p = bootinfo::update_plan(&root)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Boot(BootCmd::Order(OrderCmd::Show)) => {
+            let o = bootinfo::order(&root, &mut exec)?;
+            if cli.json {
+                print_json(&o)?;
+            } else {
+                outln!("Built-in boot order: {}", o.default.join(" "));
+                match (&o.writable, &o.reason) {
+                    (Some(w), _) => {
+                        outln!("Environment: {w}");
+                        match &o.saved {
+                            Some(s) => outln!("Saved boot order: {}", s.join(" ")),
+                            None => outln!("Saved boot order: none (U-Boot uses the built-in one)"),
+                        }
+                    }
+                    (None, Some(r)) => outln!("The boot order cannot be changed: {r}"),
+                    _ => {}
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Boot(BootCmd::Order(OrderCmd::Set { targets, change })) => {
+            let p = bootinfo::order_plan(&root, &mut exec, targets)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Boot(BootCmd::Order(OrderCmd::Reset { change })) => {
+            let p = bootinfo::order_reset_plan(&root)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Interfaces(InterfacesCmd::List) => {
+            let st = interfaces::status(&root)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                print_interfaces(&st);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Interfaces(InterfacesCmd::Enable { names, change }) => {
+            let p = interfaces::enable_plan(&root, names)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Interfaces(InterfacesCmd::Disable { names, change }) => {
+            let p = interfaces::disable_plan(&root, names)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Leds(LedsCmd::List) => {
+            let st = leds::status(&root)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                for l in &st.leds {
+                    outln!(
+                        "{:<24} {:<12} (offers: {})",
+                        l.name,
+                        l.trigger,
+                        l.triggers.join(" ")
+                    );
+                }
+                outln!(
+                    "Kept across reboots by: {}",
+                    if st.armbian_led_state {
+                        "armbian-led-state.service (/etc/armbian-leds.conf)"
+                    } else {
+                        "hwtool-boot.service (/etc/hwtool/leds.conf)"
+                    }
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Leds(LedsCmd::Set {
+            name,
+            trigger,
+            change,
+        }) => {
+            let p = leds::set_plan(&root, name, trigger)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Fan(FanCmd::Show) => {
+            let st = thermal::status(&root)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                print_thermal(&st);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Wifi(WifiCmd::Country {
+            country: None,
+            aic8800_follow_country,
+            ..
+        }) => {
+            if *aic8800_follow_country {
+                bail!("--aic8800-follow-country needs a country to set");
+            }
+            let st = wifi::status(&root, &mut exec)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                outln!(
+                    "Country in use: {}",
+                    st.country
+                        .as_deref()
+                        .unwrap_or("unknown (iw is not installed)")
+                );
+                for (phy, c) in &st.self_managed {
+                    outln!("  {phy} manages its own rules: country {c}");
+                }
+                outln!(
+                    "Set at boot: {}",
+                    st.configured
+                        .as_deref()
+                        .map(|c| format!("{c} ({})", wifi::MODPROBE))
+                        .unwrap_or_else(|| "no".into())
+                );
+                if st.aic8800 {
+                    outln!(
+                        "aic8800 driver: {}",
+                        if st.aic8800_follows_country {
+                            "follows the country (custregd=0)"
+                        } else {
+                            "its own permissive rules (custregd on, the driver's default)"
+                        }
+                    );
+                }
+                for n in &st.notes {
+                    outln!("{n}");
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Wifi(WifiCmd::Country {
+            country: Some(c),
+            aic8800_follow_country,
+            change,
+        }) => {
+            let p = wifi::set_plan(&root, &mut exec, c, *aic8800_follow_country)?;
             apply(cli, &root, &mut exec, p, change.clone())
         }
         Command::Boot(BootCmd::Migrate {
@@ -715,6 +970,104 @@ fn print_boot(st: &bootloader::Status) {
     }
     for m in &st.missing {
         outln!("Not available: {m}");
+    }
+}
+
+fn print_versions(v: &bootinfo::Versions) {
+    outln!(
+        "U-Boot in the package: {}",
+        v.package.as_deref().unwrap_or("no version string found")
+    );
+    if let Some(s) = &v.package_spi {
+        if Some(s) != v.package.as_ref() {
+            outln!("  SPI image: {s}");
+        }
+    }
+    for m in &v.media {
+        let starts = if v.starts_from.as_deref() == Some(m.device.as_str()) {
+            "  (the board starts from here)"
+        } else {
+            ""
+        };
+        outln!(
+            "  {:<14} {:<4} {}{}{}",
+            m.device,
+            m.kind,
+            m.state,
+            m.version
+                .as_deref()
+                .map(|x| format!(": {x}"))
+                .unwrap_or_default(),
+            starts
+        );
+    }
+}
+
+fn print_interfaces(st: &interfaces::Status) {
+    outln!("40-pin header interfaces for {}:", st.board);
+    for e in &st.interfaces {
+        let i = &e.interface;
+        let pins: Vec<String> = i
+            .pins
+            .iter()
+            .map(|p| format!("{} {}", p.pin, p.signal))
+            .collect();
+        outln!(
+            "  [{}] {:<14} {}",
+            if e.enabled { "x" } else { " " },
+            i.name,
+            i.title
+        );
+        outln!("      pins {}", pins.join(", "));
+        if !e.blocked_by.is_empty() {
+            outln!(
+                "      cannot be enabled with {} (enabled)",
+                e.blocked_by.join(", ")
+            );
+        } else if !e.conflicts.is_empty() {
+            outln!("      not together with {}", e.conflicts.join(", "));
+        }
+    }
+    if !st.busy.is_empty() {
+        outln!("Pins the board uses itself:");
+        for (pin, what) in &st.busy {
+            outln!("  {pin:>2}  {what}");
+        }
+    }
+}
+
+fn print_thermal(st: &thermal::Status) {
+    for z in &st.zones {
+        outln!(
+            "{} ({}): {}",
+            z.kind,
+            z.name,
+            z.temp_mc
+                .map(|t| format!("{:.1} C", t as f64 / 1000.0))
+                .unwrap_or_else(|| "unknown".into())
+        );
+        for t in &z.trips {
+            outln!(
+                "  trip {} {:<9} {:.1} C{}",
+                t.index,
+                t.kind,
+                t.temp_mc as f64 / 1000.0,
+                if t.writable { " (writable)" } else { "" }
+            );
+        }
+    }
+    for c in &st.cooling {
+        outln!(
+            "Cooling {} ({}): state {} of {}",
+            c.kind,
+            c.name,
+            c.cur_state,
+            c.max_state
+        );
+    }
+    outln!("Fan: {}", if st.fan { "yes" } else { "none" });
+    for n in &st.notes {
+        outln!("{n}");
     }
 }
 
