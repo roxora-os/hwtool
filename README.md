@@ -9,6 +9,9 @@ hwtool changes the hardware settings of a board running a
    (for example `edge` and `vendor`), and go back.
 3. **Boot storage**: write the bootloader to SPI flash or eMMC, and move the
    running system from an SD card to eMMC or NVMe.
+4. **NPU**: show whether the NPU can run
+   [charsiu](https://github.com/gahingwoo/charsiu) (the `rocket` driver, the
+   NPU device tree nodes, `/dev/accel`), and install or remove charsiu.
 
 It works with what the board's packages already provide: `/boot/armbianEnv.txt`
 read by `boot.scr`, the `linux-image`, `linux-dtb` and `linux-u-boot` packages
@@ -20,7 +23,7 @@ There are two packages:
 | Package | Content |
 | --- | --- |
 | `roxora-hwtool` | `hwtool`, the command line tool. No GUI dependencies. |
-| `roxora-hwtool-gtk` | `hwtool-gtk`, a GTK 4 app ("Hardware Tool") that runs `hwtool` through polkit. |
+| `roxora-hwtool-gtk` | `hwtool-gtk`, a GTK 4 and libadwaita app ("Hardware Tool") that runs `hwtool` through polkit. |
 
 ## Using it
 
@@ -36,6 +39,9 @@ hwtool boot status
 sudo hwtool boot write-bootloader --target spi
 sudo hwtool boot write-bootloader --target /dev/mmcblk0
 sudo hwtool boot migrate --target /dev/nvme0n1 --write-spi
+hwtool npu status
+sudo hwtool npu install-charsiu                # then: charsiu pull
+sudo hwtool npu remove-charsiu
 ```
 
 Every command that changes something:

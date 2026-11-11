@@ -227,9 +227,42 @@ unmounts the target; if the U-Boot write to the eMMC fails, it zeroes the
 range that write covered, so the board does not try to start a partial
 U-Boot.
 
+## The NPU and charsiu
+
+charsiu runs language models on the RK3576 NPU through the mainline
+`rocket` DRM accel driver. The edge kernel ships it as
+`drivers/accel/rocket/rocket.ko`; the device tree has the NPU cores
+(`rockchip,rk3576-rknn-core`, under `/soc`, on RK3588
+`rockchip,rk3588-rknn-core` at the top level); the bound driver gives
+`/dev/accel/accel0`. Vendor kernels have Rockchip's `rknpu` instead, which
+charsiu does not use.
+
+`hwtool npu status` looks at the running kernel, or, when the running
+kernel is not one of the board's (a chroot, a container), at the kernel
+the board boots next. It reports the rocket module (file, built in,
+loaded), `rknpu`, the NPU nodes from `/sys/firmware/devicetree/base` (or
+`/proc/device-tree`) with their `status`, the `/dev/accel` devices with
+mode, owner and group, and charsiu's installed version, candidate and
+origin from `apt-cache policy`, and ends in one verdict.
+
+charsiu is a package in the Armbian repository (`noble-utils`), which
+Roxora's apt pinning allows by name. `hwtool npu install-charsiu` refuses
+unless the kernel is not a vendor one, has rocket and the device tree has
+an enabled NPU node. Its plan shows `apt-get -s --no-install-recommends
+install charsiu` and stops if apt would install or remove anything else;
+charsiu's Recommends (curl or wget, whiptail) are named in a notice. It
+never downloads a model: `charsiu pull` does that. `remove-charsiu` is the
+same in reverse; downloaded models stay. A kernel switch to a vendor
+branch notes that an installed charsiu does not work there.
+
 ## The GTK app
 
-`hwtool-gtk` runs as the user and refuses to run as root. It reads state
+`hwtool-gtk` is a GTK 4 and libadwaita 1.5 app laid out like a GNOME
+Settings panel: pages Board, Overlays, Kernel, Storage and NPU, a bottom
+page switcher on narrow screens, destructive actions in their own groups,
+confirmations as dialogs that show the plan, results as toasts, and a
+status page for boards it does not recognise. It runs as the user and
+refuses to run as root. It reads state
 with `hwtool --json`, shows the output of `hwtool ... --dry-run` in a
 confirmation dialog, and runs the change with
 `pkexec /usr/bin/hwtool ... --yes --expect-plan <fingerprint>`, so what runs
