@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/core"]
+members = ["crates/core", "crates/cli", "crates/gtk"]
+# The GTK app needs the GTK 4 development files. Build it explicitly with
+# `cargo build -p roxora-hwtool-gtk`; plain `cargo build` and `cargo test`
+# cover the core library and the CLI only.
+default-members = ["crates/core", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"

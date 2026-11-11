@@ -1,0 +1,22 @@
+[package]
+name = "roxora-hwtool"
+description = "Command line tool for device tree overlays, kernel branch and boot storage on Roxora boards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hwtool"
+path = "src/main.rs"
+
+[dependencies]
+roxora-hwtool-core = { path = "../core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
