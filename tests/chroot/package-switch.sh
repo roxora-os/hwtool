@@ -113,10 +113,10 @@ if in_root hwtool kernel switch vendor </dev/null; then
 fi
 
 step "switch to vendor"
-# apt keeps the .deb files it downloaded; drop the kernel image so that one
-# is saved by rebuilding it from the dpkg database instead of copied.
-ls "$r"/var/cache/apt/archives/linux-*.deb
-rm "$r"/var/cache/apt/archives/linux-image-edge-rockchip64_*.deb
+# apt uses file: repositories in place and caches nothing, so put the edge
+# U-Boot package where apt would have downloaded it. That one is copied;
+# the others are rebuilt from the dpkg database.
+cp "$r"/srv/repo/linux-u-boot-radxa-rock-4d-edge_*.deb "$r/var/cache/apt/archives/"
 in_root hwtool kernel switch vendor --dry-run | tee /tmp/switch-dry.txt
 grep -q 'rebuild the package from the dpkg database' /tmp/switch-dry.txt || fail "dry run does not show the rebuild"
 grep -q 'copy /var/cache/apt/archives/linux-u-boot-radxa-rock-4d-edge_26.11.0-trunk_arm64.deb' /tmp/switch-dry.txt \
