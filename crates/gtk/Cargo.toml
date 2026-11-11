@@ -1,0 +1,17 @@
+[package]
+name = "roxora-hwtool-gtk"
+description = "GTK 4 app for device tree overlays, kernel branch and boot storage on Roxora boards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hwtool-gtk"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+# GNOME 46 is what Ubuntu 24.04 ships (GTK 4.14).
+gtk = { package = "gtk4", version = "0.11", features = ["gnome_46"] }
