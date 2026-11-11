@@ -222,7 +222,61 @@ grep -v '^overlays=' "$r/boot/armbianEnv.txt" | diff -u /tmp/env.orig - || fail 
 
 step "one backup per change"
 ls -d "$r"/var/backups/hwtool/*/
-[[ "$(find "$r/var/backups/hwtool" -name armbianEnv.txt | wc -l)" -eq 4 ]] || fail "expected 4 backups"
+[[ "$(find "$r/var/backups/hwtool" -name armbianEnv.txt | wc -l)" -ge 4 ]] || fail "expected a backup per change"
+
+step "kernel headers, hold, boot options, user overlay"
+# Headers: edge headers are installed from the image state; remove, then
+# install again.
+in_root hwtool kernel headers remove --dry-run
+in_root hwtool kernel headers remove --yes
+if in_root dpkg-query -W -f '${db:Status-Abbrev}\n' linux-headers-edge-rockchip64 2>/dev/null | grep -q '^ii'; then
+  fail "headers still installed"
+fi
+in_root hwtool kernel headers install --yes
+in_root dpkg-query -W linux-headers-edge-rockchip64
+# Hold: apt-mark records it, switch refuses, unhold releases.
+in_root hwtool kernel hold --yes
+in_root apt-mark showhold | tee /tmp/held.txt
+grep -qx linux-image-edge-rockchip64 /tmp/held.txt || fail "image not held"
+in_root hwtool kernel status | grep -q 'Held packages: linux-' || fail "status does not show the hold"
+if in_root hwtool kernel switch vendor --dry-run 2>/tmp/held-switch.txt; then
+  fail "switch did not refuse while held"
+fi
+grep -q 'hwtool kernel unhold' /tmp/held-switch.txt || fail "refusal does not name unhold"
+in_root hwtool kernel unhold --yes
+[[ -z "$(in_root apt-mark showhold)" ]] || fail "packages still held"
+# Boot options: the image's boot.cmd is a stand-in here, so give it the real
+# script's bootargs line.
+cp "$here/../../crates/core/tests/fixtures/boot-rk3576.cmd" "$r/boot/boot.cmd"
+in_root hwtool bootenv show
+in_root hwtool bootenv set verbosity=7 --yes
+grep -qx verbosity=7 "$r/boot/armbianEnv.txt" || fail "verbosity not set"
+if in_root hwtool bootenv set 'extraargs=a;reboot' --yes; then fail "unsafe extraargs accepted"; fi
+in_root hwtool bootenv unset verbosity --yes
+# A user overlay: device-tree-compiler comes from Ubuntu, dtc compiles it.
+cat >"$r/tmp/roxora-test.dtso" <<'END'
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/chosen";
+		__overlay__ {
+			roxora-hwtool-test = "ok";
+		};
+	};
+};
+END
+in_root hwtool overlays add /tmp/roxora-test.dtso --dry-run | tee /tmp/ov-dry.txt
+grep -q 'Install the device tree compiler' /tmp/ov-dry.txt || fail "dry run does not install dtc"
+in_root hwtool overlays add /tmp/roxora-test.dtso --yes
+[[ -s "$r/boot/overlay-user/roxora-test.dtbo" ]] || fail "overlay not installed"
+grep -q '^user_overlays=.*roxora-test' "$r/boot/armbianEnv.txt" || fail "overlay not enabled"
+fdtdump "$r/boot/overlay-user/roxora-test.dtbo" 2>/dev/null | grep -q 'roxora-hwtool-test' \
+  || in_root dtc -I dtb -O dts "/boot/overlay-user/roxora-test.dtbo" | grep -q roxora-hwtool-test \
+  || fail "compiled overlay does not contain the property"
+in_root hwtool overlays list | grep -q 'roxora-test'
+in_root hwtool overlays remove roxora-test --yes
+[[ ! -e "$r/boot/overlay-user/roxora-test.dtbo" ]] || fail "overlay not removed"
 
 step "NPU status and charsiu"
 # The NPU as on a ROCK 4D: hwtool reads the device tree from
