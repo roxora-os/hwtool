@@ -105,7 +105,7 @@ step "dry run changes nothing"
 state() {
   in_root dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' | sort
   find "$r/boot" "$r/var/lib/hwtool" "$r/var/backups/hwtool" "$r/var/log/hwtool" \
-    "$r/etc/apt" -printf '%p %s %T@\n' 2>/dev/null | sort
+    "$r/etc/apt" -printf '%p %s %T@\n' 2>/dev/null | sort || true
 }
 before="$(state | sha256sum)"
 in_root hwtool kernel switch vendor --dry-run
