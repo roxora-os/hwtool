@@ -459,6 +459,18 @@ fn wifi_country() {
             .unwrap()
             .aic8800_follows_country
     );
+    // Without the option again, the driver goes back to its own rules.
+    let text = wifi::set_plan(&f.root(), &mut ex, "US", false)
+        .unwrap()
+        .render();
+    assert!(
+        !text.contains("options aic8800_fdrv_usb custregd=0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("goes back to its own permissive rules"),
+        "{text}"
+    );
 }
 
 // ---- swap -------------------------------------------------------------------------------

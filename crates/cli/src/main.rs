@@ -146,6 +146,7 @@ enum WifiCmd {
         country: Option<String>,
         /// Also make the aic8800 driver (ROCK 4D) follow the country instead
         /// of its own permissive rules (custregd=0; not tried on hardware).
+        /// Give it every time: without it the driver's own rules return.
         #[arg(long)]
         aic8800_follow_country: bool,
         #[command(flatten)]

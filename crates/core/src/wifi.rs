@@ -167,7 +167,7 @@ pub fn set_plan(
     let mut conf = format!(
         "# Written by hwtool wifi country. The Wi-Fi regulatory country.\noptions cfg80211 ieee80211_regdom={c}\n"
     );
-    if aic_follow || st.aic8800_follows_country {
+    if aic_follow {
         conf.push_str(&format!(
             "# Let the aic8800 driver follow it instead of its own permissive rules.\noptions {AIC_MODULE} custregd=0\n"
         ));
@@ -186,7 +186,12 @@ pub fn set_plan(
         },
     );
     p.run(format!("Set {c} now"), &["iw", "reg", "set", &c]);
-    if st.aic8800 && !(aic_follow || st.aic8800_follows_country) {
+    if st.aic8800_follows_country && !aic_follow {
+        p.warnings.push(format!(
+            "{AIC_MODULE} goes back to its own permissive rules after the next reboot \
+             (add --aic8800-follow-country to keep custregd=0)."
+        ));
+    } else if st.aic8800 && !aic_follow {
         p.warnings.push(
             "The aic8800 Wi-Fi (ROCK 4D) keeps its own permissive rules and does not follow this \
              country. Add --aic8800-follow-country to change that (not tried on hardware yet)."
