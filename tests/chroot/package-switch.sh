@@ -18,7 +18,7 @@ r="$(mktemp -d /tmp/hwtool-chroot.XXXXXX)"
 mirror="${MIRROR:-http://ports.ubuntu.com/ubuntu-ports}"
 
 cleanup() {
-  for m in dev/pts dev proc sys; do
+  for m in sys/firmware dev/pts dev proc sys; do
     umount "$r/$m" 2>/dev/null || true
   done
 }
@@ -56,6 +56,10 @@ echo "deb [trusted=yes] file:/srv/repo ./" >"$r/etc/apt/sources.list.d/armbian.l
 # rendered with @ORIGIN@=Armbian, under the name images install it as.
 cat >"$r/etc/apt/preferences.d/roxora-hardware.pref" <<'END'
 Package: linux-image-* linux-dtb-* linux-headers-* linux-u-boot-* armbian-firmware*
+Pin: release o=Armbian
+Pin-Priority: 500
+
+Package: charsiu
 Pin: release o=Armbian
 Pin-Priority: 500
 
@@ -219,6 +223,75 @@ grep -v '^overlays=' "$r/boot/armbianEnv.txt" | diff -u /tmp/env.orig - || fail 
 step "one backup per change"
 ls -d "$r"/var/backups/hwtool/*/
 [[ "$(find "$r/var/backups/hwtool" -name armbianEnv.txt | wc -l)" -eq 4 ]] || fail "expected 4 backups"
+
+step "NPU status and charsiu"
+# The NPU as on a ROCK 4D: hwtool reads the device tree from
+# /sys/firmware/devicetree/base and the rocket module of the kernel the board
+# boots next (the chroot's running kernel is the runner's).
+npu_fake=no
+if mount -t tmpfs tmpfs "$r/sys/firmware" 2>/dev/null; then
+  for n in npu@27700000 npu@27708000; do
+    mkdir -p "$r/sys/firmware/devicetree/base/soc/$n"
+    printf 'rockchip,rk3576-rknn-core\0' >"$r/sys/firmware/devicetree/base/soc/$n/compatible"
+    printf 'okay\0' >"$r/sys/firmware/devicetree/base/soc/$n/status"
+  done
+  mkdir -p "$r/lib/modules/7.3.4-edge-rockchip64/kernel/drivers/accel/rocket"
+  : >"$r/lib/modules/7.3.4-edge-rockchip64/kernel/drivers/accel/rocket/rocket.ko"
+  npu_fake=yes
+else
+  echo "cannot mount a tmpfs on /sys/firmware in the chroot; the install path is not tested"
+fi
+# charsiu from apt.armbian.com, behind the same pin, if the runner reaches it;
+# otherwise a stand-in of origin Armbian in the local repository.
+source=apt.armbian.com
+if curl -fsSL --max-time 60 https://apt.armbian.com/armbian.key | gpg --dearmor >/tmp/armbian.gpg 2>/dev/null \
+  && [[ -s /tmp/armbian.gpg ]]; then
+  install -m 0644 /tmp/armbian.gpg "$r/usr/share/keyrings/armbian-test.gpg"
+  echo "deb [signed-by=/usr/share/keyrings/armbian-test.gpg] http://apt.armbian.com noble noble-utils" \
+    >"$r/etc/apt/sources.list.d/armbian-utils.list"
+  in_root apt-get update -q || source=local
+  in_root apt-cache policy charsiu | grep -q 'apt.armbian.com' || source=local
+else
+  source=local
+fi
+if [[ $source == local ]]; then
+  rm -f "$r/etc/apt/sources.list.d/armbian-utils.list"
+  c="$(mktemp -d)"
+  mkdir -p "$c/usr/bin" "$c/DEBIAN"
+  printf '#!/bin/sh\necho charsiu stand-in\n' >"$c/usr/bin/charsiu"
+  chmod 0755 "$c/usr/bin/charsiu"
+  printf 'Package: charsiu\nVersion: 0.1.0\nArchitecture: arm64\nMaintainer: Test <test@example.invalid>\nDepends: libc6\nRecommends: curl | wget, whiptail\nDescription: stand-in\n' >"$c/DEBIAN/control"
+  dpkg-deb --root-owner-group --build "$c" "$r/srv/repo/charsiu_0.1.0_arm64.deb" >/dev/null
+  reindex "$r/srv/repo"
+  in_root apt-get update -q
+fi
+echo "charsiu source: $source"
+in_root apt-cache policy charsiu
+in_root hwtool npu status
+in_root hwtool --json npu status >/tmp/npu.json
+grep -q '"candidate": "0.1.0"' /tmp/npu.json || fail "no charsiu candidate"
+if [[ $npu_fake == yes ]]; then
+  grep -q '"can_install": true' /tmp/npu.json || fail "hwtool does not see the NPU"
+  in_root hwtool npu install-charsiu --dry-run | tee /tmp/charsiu-dry.txt
+  grep -q 'Inst charsiu' /tmp/charsiu-dry.txt || fail "dry run does not show apt's resolution"
+  grep -q 'charsiu pull' /tmp/charsiu-dry.txt || fail "dry run does not mention charsiu pull"
+  in_root hwtool npu install-charsiu --yes
+  in_root dpkg-query -W charsiu
+  in_root hwtool npu status | tee /tmp/npu.txt
+  grep -q 'charsiu: 0.1.0 installed' /tmp/npu.txt || fail "status does not show charsiu installed"
+  in_root hwtool kernel switch vendor --dry-run | tee /tmp/vendor-dry.txt
+  grep -q 'charsiu 0.1.0 is installed. It needs the edge kernel' /tmp/vendor-dry.txt \
+    || fail "switch dry run does not warn about charsiu"
+  in_root hwtool npu remove-charsiu --yes
+  if in_root dpkg-query -W -f '${db:Status-Abbrev}\n' charsiu 2>/dev/null | grep -q '^ii'; then
+    fail "charsiu still installed after remove-charsiu"
+  fi
+  umount "$r/sys/firmware"
+  # No NPU node: install is refused before apt runs.
+  if in_root hwtool npu install-charsiu --dry-run; then
+    fail "install-charsiu did not refuse without an NPU"
+  fi
+fi
 
 step "boot status"
 in_root hwtool boot status
