@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Hardware Tool
+GenericName=Board Settings
+Comment=Device tree overlays, kernel branch, boot storage, CPU and NPU of the board
+Exec=hwtool-gtk
+Icon=io.github.roxora_os.HwTool
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.roxora_os.HwTool
+Categories=System;Settings;HardwareSettings;
+Keywords=overlay;device tree;kernel;bootloader;U-Boot;eMMC;NVMe;CPU;NPU;charsiu;

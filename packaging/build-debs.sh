@@ -65,8 +65,21 @@ build_deb roxora-hwtool \
 if [[ -x "$target/release/hwtool-gtk" ]]; then
   gtk="$work/roxora-hwtool-gtk"
   install -D -m 0755 "$target/release/hwtool-gtk" "$gtk/usr/bin/hwtool-gtk"
-  install -D -m 0644 "$here/io.github.roxora_os.HwTool.desktop" \
-    "$gtk/usr/share/applications/io.github.roxora_os.HwTool.desktop"
+  data="$top/data"
+  app=io.github.roxora_os.HwTool
+  install -D -m 0644 "$data/$app.desktop" "$gtk/usr/share/applications/$app.desktop"
+  install -D -m 0644 "$data/$app.metainfo.xml" "$gtk/usr/share/metainfo/$app.metainfo.xml"
+  # Icons from roxora-os/design (data/icons/README.md). The hicolor icon
+  # cache and the desktop database are updated by the dpkg file triggers of
+  # libgtk-4-bin/gtk-update-icon-cache and desktop-file-utils.
+  for png in "$data"/icons/png/roxora-hwtool-*.png; do
+    n="${png##*-}"
+    n="${n%.png}"
+    install -D -m 0644 "$png" "$gtk/usr/share/icons/hicolor/${n}x${n}/apps/$app.png"
+  done
+  install -D -m 0644 "$data/icons/roxora-hwtool.svg" "$gtk/usr/share/icons/hicolor/scalable/apps/$app.svg"
+  install -D -m 0644 "$data/icons/roxora-hwtool-symbolic.svg" \
+    "$gtk/usr/share/icons/hicolor/symbolic/apps/$app-symbolic.svg"
   install -D -m 0644 "$here/io.github.roxora_os.hwtool.policy" \
     "$gtk/usr/share/polkit-1/actions/io.github.roxora_os.hwtool.policy"
   build_deb roxora-hwtool-gtk \

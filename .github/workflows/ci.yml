@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev dpkg-dev xvfb xauth desktop-file-utils
+            libgtk-4-dev libadwaita-1-dev dpkg-dev xvfb xauth desktop-file-utils appstream
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -58,7 +58,19 @@ jobs:
           hwtool --version
           hwtool --help
           test -f /usr/share/polkit-1/actions/io.github.roxora_os.hwtool.policy
-          desktop-file-validate /usr/share/applications/io.github.roxora_os.HwTool.desktop
+          app=io.github.roxora_os.HwTool
+          desktop-file-validate /usr/share/applications/$app.desktop
+          appstreamcli validate --no-net /usr/share/metainfo/$app.metainfo.xml
+          grep -qx "Icon=$app" /usr/share/applications/$app.desktop
+          for n in 16 24 32 48 64 128 256 512; do
+            test -s /usr/share/icons/hicolor/${n}x${n}/apps/$app.png
+          done
+          test -s /usr/share/icons/hicolor/scalable/apps/$app.svg
+          test -s /usr/share/icons/hicolor/symbolic/apps/$app-symbolic.svg
+          # The gtk-update-icon-cache dpkg trigger rebuilt the cache on install.
+          test "$(stat -c %Y /usr/share/icons/hicolor/icon-theme.cache)" -ge \
+            "$(stat -c %Y /usr/share/icons/hicolor/scalable/apps/$app.svg)"
+          dpkg -L roxora-hwtool-gtk
 
       - name: The packaged GTK app ignores the test variables and refuses root
         env:

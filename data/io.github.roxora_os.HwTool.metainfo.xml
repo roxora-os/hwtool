@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Ga Hing Woo -->
+<component type="desktop-application">
+  <id>io.github.roxora_os.HwTool</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-only</project_license>
+  <name>Hardware Tool</name>
+  <summary>Change the hardware settings of a Roxora board</summary>
+  <developer id="io.github.roxora_os">
+    <name>Roxora Project</name>
+  </developer>
+  <description>
+    <p>
+      Hardware Tool shows and changes the hardware settings of a board
+      running a Roxora image: device tree overlays, the kernel branch and its
+      headers, boot options, the bootloader and the drive the system runs
+      from, CPU frequency, and the NPU for charsiu.
+    </p>
+    <p>
+      Every change is shown in full before it runs, asks for the
+      administrator password, backs up the files it changes and keeps a log.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.roxora_os.HwTool.desktop</launchable>
+  <url type="homepage">https://github.com/roxora-os/hwtool</url>
+  <url type="bugtracker">https://github.com/roxora-os/hwtool/issues</url>
+  <url type="vcs-browser">https://github.com/roxora-os/hwtool</url>
+  <categories>
+    <category>System</category>
+    <category>Settings</category>
+  </categories>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-11"/>
+  </releases>
+</component>
