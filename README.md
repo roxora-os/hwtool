@@ -46,7 +46,7 @@ Every command that changes something:
   root);
 - asks you to type `yes`, unless you add `--yes`; without a terminal it
   refuses unless `--yes` is given;
-- copies a boot configuration file to `/var/backups/roxora-hwtool/<time>/`
+- copies a boot configuration file to `/var/backups/hwtool/<time>/`
   before changing it;
 - refuses to write to the device the system is running from, unless that is
   the point of the command (`--allow-booted-device` for a bootloader update

@@ -34,9 +34,9 @@ use crate::storage::{self, part_dev};
 use crate::ENV_FILE;
 
 /// Where the new root is mounted while it is filled.
-pub const MOUNT: &str = "/mnt/roxora-hwtool-target";
+pub const MOUNT: &str = "/mnt/hwtool-target";
 /// Copied from packages/bsp/common/usr/lib/armbian-install/exclude.txt.
-pub const EXCLUDE_FILE: &str = "/run/roxora-hwtool/migrate-exclude.txt";
+pub const EXCLUDE_FILE: &str = "/run/hwtool/migrate-exclude.txt";
 pub const EXCLUDE: &str = "/boot/*\n/dev/*\n/proc/*\n/sys/*\n/media/*\n/mnt/*\n/run/*\n/tmp/*\n/ddbr/*\n/var/log/journal\n";
 
 const TOOLS: &[(&str, &str)] = &[

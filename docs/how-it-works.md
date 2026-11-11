@@ -81,7 +81,7 @@ old one.
 6. removes the old kernel, device tree and header packages (`--keep-old`
    keeps them);
 7. records the old branch and package versions in
-   `/var/lib/roxora-hwtool/kernel-history.json`.
+   `/var/lib/hwtool/kernel-history.json`.
 
 `hwtool kernel revert` switches back to the recorded branch, asking apt for
 the recorded versions when the repository still has them.

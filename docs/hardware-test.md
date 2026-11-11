@@ -53,7 +53,7 @@ log shows `Applying user provided DT overlay roxora-test.dtbo`, then:
 
     cat /proc/device-tree/chosen/roxora-hwtool-test        # prints ok
     sudo hwtool overlays disable roxora-test                # type yes
-    ls /var/backups/roxora-hwtool/*/boot/armbianEnv.txt     # a backup exists
+    ls /var/backups/hwtool/*/boot/armbianEnv.txt     # a backup exists
 
 Reboot. Pass: `/proc/device-tree/chosen/roxora-hwtool-test` no longer exists
 and the board booted normally both times.

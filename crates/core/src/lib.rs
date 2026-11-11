@@ -26,8 +26,8 @@ pub mod storage;
 pub use root::Root;
 
 /// Where hwtool keeps its own state on the target system.
-pub const STATE_DIR: &str = "/var/lib/roxora-hwtool";
+pub const STATE_DIR: &str = "/var/lib/hwtool";
 /// Where boot configuration files are copied before they are changed.
-pub const BACKUP_DIR: &str = "/var/backups/roxora-hwtool";
+pub const BACKUP_DIR: &str = "/var/backups/hwtool";
 /// The boot environment file read by `boot.scr`.
 pub const ENV_FILE: &str = "/boot/armbianEnv.txt";

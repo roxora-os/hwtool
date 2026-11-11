@@ -177,7 +177,7 @@ fn switch_to_vendor_and_back() {
         ]
     );
     assert_eq!(
-        f.read("/var/backups/roxora-hwtool/T1/boot/armbianEnv.txt"),
+        f.read("/var/backups/hwtool/T1/boot/armbianEnv.txt"),
         ROCK4D_ENV
     );
     assert!(f

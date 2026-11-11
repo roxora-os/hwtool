@@ -115,7 +115,7 @@ done
 for p in linux-image-edge-rockchip64 linux-dtb-edge-rockchip64 linux-u-boot-radxa-rock-4d-edge linux-headers-edge-rockchip64; do
   grep -qx "$p" <<<"$installed" && fail "$p is still installed"
 done
-ls "$r"/var/backups/roxora-hwtool/*/boot/armbianEnv.txt >/dev/null || fail "no backup of armbianEnv.txt"
+ls "$r"/var/backups/hwtool/*/boot/armbianEnv.txt >/dev/null || fail "no backup of armbianEnv.txt"
 in_root hwtool overlays list
 in_root hwtool kernel status
 
@@ -130,8 +130,8 @@ fi
 grep -v '^overlays=' "$r/boot/armbianEnv.txt" | diff -u /tmp/env.orig - || fail "armbianEnv.txt differs after the round trip"
 
 step "one backup per change"
-ls -d "$r"/var/backups/roxora-hwtool/*/
-[[ "$(find "$r/var/backups/roxora-hwtool" -name armbianEnv.txt | wc -l)" -eq 3 ]] || fail "expected 3 backups"
+ls -d "$r"/var/backups/hwtool/*/
+[[ "$(find "$r/var/backups/hwtool" -name armbianEnv.txt | wc -l)" -eq 3 ]] || fail "expected 3 backups"
 
 step "boot status"
 in_root hwtool boot status

@@ -25,7 +25,7 @@ use crate::plan::{self, Action, Plan};
 use crate::root::Root;
 use crate::ENV_FILE;
 
-pub const HISTORY_FILE: &str = "/var/lib/roxora-hwtool/kernel-history.json";
+pub const HISTORY_FILE: &str = "/var/lib/hwtool/kernel-history.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryEntry {

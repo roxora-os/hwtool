@@ -164,9 +164,9 @@ fn migrate_to_emmc() {
         "$ parted -s -a optimal /dev/mmcblk0 mkpart primary ext4 16MiB 100%",
         "$ parted -s /dev/mmcblk0 set 1 legacy_boot on",
         "$ mkfs.ext4 -qF /dev/mmcblk0p1",
-        "$ rsync -ax --delete --exclude-from=/run/roxora-hwtool/migrate-exclude.txt / /mnt/roxora-hwtool-target",
+        "$ rsync -ax --delete --exclude-from=/run/hwtool/migrate-exclude.txt / /mnt/hwtool-target",
         "$ dd if=/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip.bin of=/dev/mmcblk0 bs=32k seek=1 conv=notrunc status=none",
-        "$ umount /mnt/roxora-hwtool-target",
+        "$ umount /mnt/hwtool-target",
     ] {
         assert!(text.contains(want), "missing {want:?} in\n{text}");
     }

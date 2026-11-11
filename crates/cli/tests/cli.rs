@@ -101,7 +101,7 @@ fn no_terminal_needs_yes() {
     assert!(fs::read_to_string(d.path().join("boot/armbianEnv.txt"))
         .unwrap()
         .ends_with("overlays=uart1\n"));
-    let backups = fs::read_dir(d.path().join("var/backups/roxora-hwtool"))
+    let backups = fs::read_dir(d.path().join("var/backups/hwtool"))
         .unwrap()
         .count();
     assert_eq!(backups, 1);
