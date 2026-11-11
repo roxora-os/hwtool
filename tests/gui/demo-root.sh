@@ -51,6 +51,8 @@ write_uboot_platform_mtd ()
     flashcp -v -p "$1/u-boot-rockchip-spi.bin" /dev/mtd0
 }
 END
+mkdir -p "$r/usr/sbin"
+printf '#!/bin/sh\n' >"$r/usr/sbin/flashcp"
 truncate -s 9561600 "$r/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip.bin"
 truncate -s 1598976 "$r/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip-spi.bin"
 
@@ -69,4 +71,22 @@ echo 61071360 >"$r/sys/block/mmcblk0/size"
 echo MMC >"$r/sys/block/mmcblk0/device/type"
 echo 500118192 >"$r/sys/block/nvme0n1/size"
 echo spi5.0 >"$r/sys/class/mtd/mtd0/name"
+
+# The NPU, as on a ROCK 4D running edge: rocket loaded, two NPU cores,
+# /dev/accel/accel0.
+mkdir -p "$r/proc/sys/kernel"
+echo "$k" >"$r/proc/sys/kernel/osrelease"
+mkdir -p "$r/lib/modules/$k/kernel/drivers/accel/rocket" "$r/dev/accel"
+: >"$r/lib/modules/$k/kernel/drivers/accel/rocket/rocket.ko"
+echo "rocket 49152 0 - Live 0x0000000000000000" >"$r/proc/modules"
+for n in npu@27700000 npu@27708000; do
+  mkdir -p "$r/proc/device-tree/soc/$n"
+  printf 'rockchip,rk3576-rknn-core\0' >"$r/proc/device-tree/soc/$n/compatible"
+  printf 'okay\0' >"$r/proc/device-tree/soc/$n/status"
+done
+: >"$r/dev/accel/accel0"
+chmod 0660 "$r/dev/accel/accel0"
+# Name the demo files' owner and group as on a board.
+echo "root:x:$(id -u):$(id -g)::/root:/bin/sh" >"$r/etc/passwd"
+echo "render:x:$(id -g):" >"$r/etc/group"
 echo 16777216 >"$r/sys/class/mtd/mtd0/size"
