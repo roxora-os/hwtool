@@ -13,7 +13,7 @@
 //! AdwPreferencesPage, AdwSwitchRow, AdwComboRow, AdwExpanderRow,
 //! AdwStatusPage and AdwAlertDialog.
 //!
-//! Environment: HWTOOL_GTK_PAGE (board, overlays, kernel, boot or npu),
+//! Environment: HWTOOL_GTK_PAGE (board, overlays, kernel, boot, cpu or npu),
 //! HWTOOL_GTK_SIZE (WIDTHxHEIGHT), HWTOOL_GTK_DARK=1, HWTOOL_GTK_EXIT_AFTER_MS
 //! and HWTOOL_GTK_SCREENSHOT (save the window as PNG to that path, then
 //! quit). Built with the `test-hooks` feature only, for CI: HWTOOL_CLI,
@@ -216,6 +216,7 @@ fn build_ui(app: &adw::Application) {
         ("overlays", "Overlays", "view-list-symbolic"),
         ("kernel", "Kernel", "emblem-system-symbolic"),
         ("boot", "Storage", "drive-harddisk-symbolic"),
+        ("cpu", "CPU", "power-profile-performance-symbolic"),
         ("npu", "NPU", "applications-science-symbolic"),
     ] {
         let holder = adw::Bin::new();
@@ -597,12 +598,39 @@ fn size(v: &Value) -> String {
     }
 }
 
+/// "crw-rw----" -> "read and write for the group".
+fn access_words(mode: &str) -> String {
+    let m: Vec<char> = mode.chars().collect();
+    if m.len() < 10 {
+        return mode.to_string();
+    }
+    let perm = |r: char, w: char| match (r == 'r', w == 'w') {
+        (true, true) => Some("read and write"),
+        (true, false) => Some("read only"),
+        (false, true) => Some("write only"),
+        _ => None,
+    };
+    let mut parts = Vec::new();
+    if let Some(p) = perm(m[4], m[5]) {
+        parts.push(format!("{p} for the group"));
+    }
+    if let Some(p) = perm(m[7], m[8]) {
+        parts.push(format!("{p} for everyone"));
+    }
+    if parts.is_empty() {
+        "owner only".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
 fn kind_name(k: &str) -> &'static str {
     match k {
         "sd" => "SD card",
         "emmc" => "eMMC",
         "nvme" => "NVMe drive",
         "usb" => "USB drive",
+        "sata" => "SATA drive",
         _ => "Disk",
     }
 }
@@ -648,6 +676,7 @@ fn refresh(ctx: &Shared) {
     overlays_page(ctx);
     kernel_page(ctx);
     boot_page(ctx);
+    cpu_page(ctx);
     npu_page(ctx);
 }
 
@@ -700,6 +729,275 @@ fn board_page(ctx: &Shared) {
         device_rows(&g, &boot);
         page.add(&g);
     }
+    if let Ok(be) = json(ctx, &["bootenv", "show"]) {
+        boot_options(ctx, &page, &be);
+    }
+    show(&holder, &page);
+}
+
+/// Value of a boot option, or boot.scr's default.
+fn opt(be: &Value, key: &str) -> Option<String> {
+    be["options"]
+        .as_array()?
+        .iter()
+        .find(|o| s(o, "key") == key)
+        .map(|o| {
+            o["value"]
+                .as_str()
+                .or_else(|| o["default"].as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+}
+
+/// A boot option row: key, value when the page was built, current value.
+type Field = (String, String, Box<dyn Fn() -> String>);
+
+fn boot_options(ctx: &Shared, page: &adw::PreferencesPage, be: &Value) {
+    let g = group(
+        "Boot Options",
+        Some("Settings in /boot/armbianEnv.txt that boot.scr reads. They take effect at the next boot."),
+    );
+    let mut fields: Vec<Field> = Vec::new();
+    if let Some(v) = opt(be, "verbosity") {
+        let levels = ["0", "1", "2", "3", "4", "5", "6", "7"];
+        let c = adw::ComboRow::builder()
+            .title("Kernel log level")
+            .subtitle("0 is quiet, 7 shows everything")
+            .model(&gtk::StringList::new(&levels))
+            .selected(levels.iter().position(|l| *l == v).unwrap_or(1) as u32)
+            .build();
+        g.add(&c);
+        fields.push((
+            "verbosity".into(),
+            v,
+            Box::new(move || levels[c.selected() as usize].to_string()),
+        ));
+    }
+    if let Some(v) = opt(be, "console") {
+        let values = ["both", "serial", "display"];
+        let labels = ["Serial and display", "Serial port", "Display"];
+        let c = adw::ComboRow::builder()
+            .title("Console")
+            .model(&gtk::StringList::new(&labels))
+            .selected(values.iter().position(|l| *l == v).unwrap_or(0) as u32)
+            .build();
+        g.add(&c);
+        fields.push((
+            "console".into(),
+            v,
+            Box::new(move || values[c.selected() as usize].to_string()),
+        ));
+    }
+    for (key, title, subtitle, on, off) in [
+        (
+            "bootlogo",
+            "Boot splash",
+            "Show a logo instead of kernel messages",
+            "true",
+            "false",
+        ),
+        (
+            "earlycon",
+            "Early console",
+            "Kernel messages from the first moment of boot",
+            "on",
+            "off",
+        ),
+        (
+            "docker_optimizations",
+            "Container options",
+            "cgroup memory and cpuset options for Docker",
+            "on",
+            "off",
+        ),
+    ] {
+        if let Some(v) = opt(be, key) {
+            let sw = adw::SwitchRow::builder()
+                .title(title)
+                .subtitle(subtitle)
+                .active(v == on)
+                .build();
+            g.add(&sw);
+            fields.push((
+                key.into(),
+                v,
+                Box::new(move || if sw.is_active() { on } else { off }.to_string()),
+            ));
+        }
+    }
+    if let Some(v) = opt(be, "extraargs") {
+        let e = adw::EntryRow::builder()
+            .title("Extra kernel arguments")
+            .text(v.as_str())
+            .build();
+        g.add(&e);
+        fields.push((
+            "extraargs".into(),
+            v,
+            Box::new(move || e.text().to_string()),
+        ));
+    }
+    if let Some(c) = be["cmdline"].as_str() {
+        let r = info("Kernel command line", c);
+        r.set_subtitle_lines(0);
+        g.add(&r);
+    }
+    let (r, b) = action_row(
+        "Apply boot options",
+        "Backs up armbianEnv.txt first",
+        "Apply…",
+        "",
+    );
+    g.add(&r);
+    page.add(&g);
+    let ctx2 = ctx.clone();
+    b.connect_clicked(move |_| {
+        let cmds: Vec<Cmd> = fields
+            .iter()
+            .filter(|(_, was, now)| *was != now())
+            .map(|(k, _, now)| {
+                let mut c = Cmd::new(&["bootenv", "set"]);
+                c.names.push(format!("{k}={}", now()));
+                c
+            })
+            .collect();
+        if cmds.is_empty() {
+            ctx2.toasts
+                .add_toast(adw::Toast::new("No boot option was changed."));
+        } else {
+            propose(&ctx2, "Change the Boot Options?", cmds, false);
+        }
+    });
+}
+
+fn cpu_page(ctx: &Shared) {
+    let holder = page_holder(ctx, "cpu");
+    let st = match json(ctx, &["cpu", "show"]) {
+        Ok(v) => v,
+        Err(e) => {
+            show(&holder, &error_page(&e));
+            return;
+        }
+    };
+    let page = adw::PreferencesPage::new();
+    for pol in st["policies"].as_array().cloned().unwrap_or_default() {
+        let name = s(&pol, "name").to_string();
+        let cpus: Vec<String> = pol["cpus"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_u64)
+                    .map(|c| c.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let core = s(&pol, "core");
+        let title = if core.is_empty() {
+            format!("CPUs {}", cpus.join(", "))
+        } else {
+            format!("{core} Cores")
+        };
+        let g = group(
+            &title,
+            Some(&format!(
+                "CPUs {} ({name}). Now {} MHz to {} MHz, governor {}.",
+                cpus.join(", "),
+                pol["min_khz"].as_u64().unwrap_or(0) / 1000,
+                pol["max_khz"].as_u64().unwrap_or(0) / 1000,
+                s(&pol, "governor")
+            )),
+        );
+        let governors: Vec<String> = pol["governors"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let freqs: Vec<u64> = pol["frequencies_khz"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        let gov_refs: Vec<&str> = governors.iter().map(String::as_str).collect();
+        let gov = adw::ComboRow::builder()
+            .title("Governor")
+            .model(&gtk::StringList::new(&gov_refs))
+            .selected(
+                governors
+                    .iter()
+                    .position(|g| g == s(&pol, "governor"))
+                    .unwrap_or(0) as u32,
+            )
+            .build();
+        let labels: Vec<String> = freqs.iter().map(|f| format!("{} MHz", f / 1000)).collect();
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let pos = |k: &str| {
+            freqs
+                .iter()
+                .position(|f| Some(*f) == pol[k].as_u64())
+                .unwrap_or(0) as u32
+        };
+        let min = adw::ComboRow::builder()
+            .title("Lowest frequency")
+            .model(&gtk::StringList::new(&label_refs))
+            .selected(pos("min_khz"))
+            .build();
+        let max = adw::ComboRow::builder()
+            .title("Highest frequency")
+            .model(&gtk::StringList::new(&label_refs))
+            .selected(pos("max_khz"))
+            .build();
+        g.add(&gov);
+        if !freqs.is_empty() {
+            g.add(&min);
+            g.add(&max);
+        }
+        let (r, b) = action_row("Apply", "Now and at every boot", "Apply…", "");
+        g.add(&r);
+        page.add(&g);
+        let ctx2 = ctx.clone();
+        b.connect_clicked(move |_| {
+            let mut c = Cmd::new(&["cpu", "set", "--policy", &name]);
+            if let Some(g) = governors.get(gov.selected() as usize) {
+                c.args.push("--governor".into());
+                c.args.push(g.clone());
+            }
+            if let (Some(lo), Some(hi)) = (
+                freqs.get(min.selected() as usize),
+                freqs.get(max.selected() as usize),
+            ) {
+                c.args.extend([
+                    "--min".into(),
+                    lo.to_string(),
+                    "--max".into(),
+                    hi.to_string(),
+                ]);
+            }
+            propose(&ctx2, "Change the CPU Frequency?", vec![c], false);
+        });
+    }
+    if st["persistent"].as_bool() == Some(true) {
+        let g = group("", None);
+        let (r, b) = action_row(
+            "Settings applied at boot",
+            "/etc/hwtool/cpufreq.conf",
+            "Reset…",
+            "destructive-action",
+        );
+        g.add(&r);
+        page.add(&g);
+        let ctx2 = ctx.clone();
+        b.connect_clicked(move |_| {
+            propose(
+                &ctx2,
+                "Reset the CPU Frequency?",
+                vec![Cmd::new(&["cpu", "reset"])],
+                true,
+            );
+        });
+    }
     show(&holder, &page);
 }
 
@@ -718,18 +1016,23 @@ fn overlays_page(ctx: &Shared) {
         .unwrap_or_default();
     let list = st["overlays"].as_array().cloned().unwrap_or_default();
     if list.is_empty() {
-        show(
-            &holder,
-            &status_page(
-                "view-list-symbolic",
-                "No Overlays for This Board",
-                &format!(
-                    "The installed device tree package has no overlays with the prefix {}. \
-                     Overlays you compile with armbian-add-overlay appear here.",
-                    prefixes.join(" or ")
-                ),
+        let sp = status_page(
+            "view-list-symbolic",
+            "No Overlays for This Board",
+            &format!(
+                "The installed device tree package has no overlays with the prefix {}. \
+                 You can add your own from a .dts or .dtso file.",
+                prefixes.join(" or ")
             ),
         );
+        let add = gtk::Button::with_label("Add Overlay…");
+        add.add_css_class("pill");
+        add.add_css_class("suggested-action");
+        add.set_halign(gtk::Align::Center);
+        let ctx2 = ctx.clone();
+        add.connect_clicked(move |_| choose_overlay(&ctx2));
+        sp.set_child(Some(&add));
+        show(&holder, &sp);
         return;
     }
     let page = adw::PreferencesPage::new();
@@ -749,7 +1052,25 @@ fn overlays_page(ctx: &Shared) {
             .active(enabled)
             .build();
         if o["kind"] == "user" {
+            let rm = gtk::Button::from_icon_name("user-trash-symbolic");
+            rm.set_valign(gtk::Align::Center);
+            rm.add_css_class("flat");
+            rm.set_tooltip_text(Some("Remove this user overlay"));
+            let ctx2 = ctx.clone();
+            let n = name.clone();
+            rm.connect_clicked(move |_| {
+                propose(
+                    &ctx2,
+                    "Remove the User Overlay?",
+                    vec![Cmd {
+                        names: vec![n.clone()],
+                        ..Cmd::new(&["overlays", "remove"])
+                    }],
+                    true,
+                );
+            });
             r.add_suffix(&tag("User", ""));
+            r.add_suffix(&rm);
         }
         g.add(&r);
         switches.borrow_mut().push((name, enabled, r));
@@ -769,8 +1090,17 @@ fn overlays_page(ctx: &Shared) {
         page.add(&g);
     }
     let g = group("", None);
+    let (r, add) = action_row(
+        "Add an overlay",
+        "Compile a .dts or .dtso file and enable it",
+        "Add…",
+        "",
+    );
+    g.add(&r);
+    let ctx2 = ctx.clone();
+    add.connect_clicked(move |_| choose_overlay(&ctx2));
     let (r, b) = action_row(
-        "Apply Changes",
+        "Apply changes",
         &format!(
             "Prefixes: {}. Takes effect after a reboot.",
             prefixes.join(" ")
@@ -812,6 +1142,30 @@ fn overlays_page(ctx: &Shared) {
         }
     });
     show(&holder, &page);
+}
+
+fn choose_overlay(ctx: &Shared) {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Device tree overlay sources"));
+    filter.add_pattern("*.dts");
+    filter.add_pattern("*.dtso");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    let dialog = gtk::FileDialog::builder()
+        .title("Add an Overlay")
+        .filters(&filters)
+        .modal(true)
+        .build();
+    let ctx2 = ctx.clone();
+    dialog.open(Some(&ctx.window), gio::Cancellable::NONE, move |res| {
+        if let Ok(file) = res {
+            if let Some(path) = file.path() {
+                let mut c = Cmd::new(&["overlays", "add"]);
+                c.names.push(path.display().to_string());
+                propose(&ctx2, "Add the Overlay?", vec![c], false);
+            }
+        }
+    });
 }
 
 fn kernel_page(ctx: &Shared) {
@@ -942,6 +1296,91 @@ fn kernel_page(ctx: &Shared) {
             );
         });
     }
+    // Headers and hold.
+    let current_branch = current.clone();
+    let headers_installed = st["branches"]
+        .as_array()
+        .and_then(|a| a.iter().find(|b| s(b, "branch") == current_branch))
+        .and_then(|b| b["installed"].as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|p| s(p, "name").starts_with("linux-headers-"))
+        })
+        .map(|p| format!("{} {}", s(p, "name"), s(p, "version")));
+    let dkms: Vec<&str> = st["dkms"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let g = group(
+        "Kernel Headers",
+        Some("DKMS needs the headers of the running kernel to build its modules for each new kernel."),
+    );
+    if !dkms.is_empty() {
+        g.add(&info("DKMS modules", &dkms.join(", ")));
+    }
+    let (r, b) = match &headers_installed {
+        Some(v) => action_row("Kernel headers", v, "Remove…", "destructive-action"),
+        None => action_row("Kernel headers", "Not installed", "Install…", ""),
+    };
+    g.add(&r);
+    let install = headers_installed.is_none();
+    let ctx2 = ctx.clone();
+    b.connect_clicked(move |_| {
+        let c = Cmd::new(&[
+            "kernel",
+            "headers",
+            if install { "install" } else { "remove" },
+        ]);
+        propose(
+            &ctx2,
+            if install {
+                "Install the Kernel Headers?"
+            } else {
+                "Remove the Kernel Headers?"
+            },
+            vec![c],
+            !install,
+        );
+    });
+    page.add(&g);
+
+    let held: Vec<&str> = st["held"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let g = group(
+        "Updates",
+        Some("Holding keeps apt from upgrading the kernel, device tree, U-Boot and firmware packages. Kernel security fixes do not arrive while they are held."),
+    );
+    let (r, b) = if held.is_empty() {
+        action_row("Kernel packages", "Upgraded by apt", "Hold…", "")
+    } else {
+        let r = action_row(
+            "Kernel packages",
+            &format!("Held: {}", held.join(", ")),
+            "Release…",
+            "",
+        );
+        r.0.add_prefix(&icon("changes-prevent-symbolic"));
+        r
+    };
+    g.add(&r);
+    let hold = held.is_empty();
+    let ctx2 = ctx.clone();
+    b.connect_clicked(move |_| {
+        let c = Cmd::new(&["kernel", if hold { "hold" } else { "unhold" }]);
+        propose(
+            &ctx2,
+            if hold {
+                "Hold the Kernel Packages?"
+            } else {
+                "Release the Kernel Packages?"
+            },
+            vec![c],
+            false,
+        );
+    });
+    page.add(&g);
     show(&holder, &page);
 }
 
@@ -997,7 +1436,7 @@ fn boot_page(ctx: &Shared) {
             .title("Allow the device the system runs from")
             .subtitle("Replaces the bootloader this system starts with")
             .build();
-        let (r, b) = action_row("Write Bootloader", "", "Write…", "destructive-action");
+        let (r, b) = action_row("Write bootloader", "", "Write…", "destructive-action");
         g.add(&combo);
         g.add(&booted);
         g.add(&r);
@@ -1017,13 +1456,18 @@ fn boot_page(ctx: &Shared) {
     let dests: Vec<String> = disks
         .iter()
         .filter(|d| d["holds_root"].as_bool() != Some(true))
-        .filter(|d| matches!(d["kind"].as_str(), Some("emmc") | Some("nvme")))
+        .filter(|d| {
+            matches!(
+                d["kind"].as_str(),
+                Some("emmc") | Some("nvme") | Some("usb") | Some("sata")
+            )
+        })
         .filter_map(|d| d["path"].as_str().map(str::to_string))
         .collect();
     if !dests.is_empty() {
         let g = group(
             "Move the System",
-            Some("Erases the chosen eMMC or NVMe drive, copies the running system to it and makes it bootable. The SD card is not changed."),
+            Some("Erases the chosen drive, copies the running system to it and makes it bootable. The SD card is not changed. USB drives need U-Boot in SPI flash."),
         );
         let refs: Vec<&str> = dests.iter().map(String::as_str).collect();
         let combo = adw::ComboRow::builder()
@@ -1036,7 +1480,7 @@ fn boot_page(ctx: &Shared) {
             .sensitive(!spi.is_empty())
             .build();
         let (r, b) = action_row(
-            "Erase and Copy",
+            "Erase and copy",
             "Everything on the chosen drive is lost",
             "Erase…",
             "destructive-action",
@@ -1131,7 +1575,7 @@ fn npu_page(ctx: &Shared) {
     }
     let nodes = st["nodes"].as_array().cloned().unwrap_or_default();
     if nodes.is_empty() {
-        g.add(&row("NPU core", "none in the device tree"));
+        g.add(&row("NPU core", "None in the device tree"));
     }
     for n in &nodes {
         let compat: Vec<&str> = n["compatible"]
@@ -1148,17 +1592,17 @@ fn npu_page(ctx: &Shared) {
     }
     let accel = st["accel"].as_array().cloned().unwrap_or_default();
     if accel.is_empty() {
-        g.add(&row("Accelerator device", "none in /dev/accel"));
+        g.add(&row("Accelerator device", "None in /dev/accel"));
     }
     for a in &accel {
         g.add(&row(
             "Accelerator device",
             &format!(
-                "{} {} {}:{}",
+                "{}, {}:{}, {}",
                 s(a, "path"),
-                s(a, "mode"),
                 s(a, "owner"),
-                s(a, "group")
+                s(a, "group"),
+                access_words(s(a, "mode"))
             ),
         ));
     }

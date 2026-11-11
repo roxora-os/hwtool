@@ -37,11 +37,11 @@ shot() { # shot <file> <root> [VAR=value...]
 for theme in light dark; do
   dark=0
   [[ $theme == dark ]] && dark=1
-  for page in board overlays kernel boot npu; do
+  for page in board overlays kernel boot cpu npu; do
     shot "$page-wide-$theme" "$work/demo" HWTOOL_GTK_PAGE=$page HWTOOL_GTK_DARK=$dark HWTOOL_GTK_SIZE=900x700
     shot "$page-narrow-$theme" "$work/demo" HWTOOL_GTK_PAGE=$page HWTOOL_GTK_DARK=$dark HWTOOL_GTK_SIZE=360x700
   done
-  for page in boot npu kernel; do
+  for page in board boot npu kernel; do
     shot "$page-tall-$theme" "$work/demo" HWTOOL_GTK_PAGE=$page HWTOOL_GTK_DARK=$dark HWTOOL_GTK_SIZE=900x1200
   done
   shot "busy-$theme" "$work/demo" HWTOOL_GTK_PAGE=kernel HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_BUSY=1

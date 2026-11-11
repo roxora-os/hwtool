@@ -33,10 +33,12 @@ END
 : >"$r/boot/overlay-user/sample-display.dtbo"
 : >"$r/boot/vmlinuz-$k"
 : >"$r/boot/boot.scr"
+here="$(cd "$(dirname "$0")" && pwd)"
+cp "$here/../../crates/core/tests/fixtures/boot-rk3576.cmd" "$r/boot/boot.cmd"
 ln -sfn "vmlinuz-$k" "$r/boot/Image"
 ln -sfn "dtb-$k" "$r/boot/dtb"
 
-for p in linux-image-edge-rockchip64 linux-dtb-edge-rockchip64 linux-u-boot-radxa-rock-4d-edge; do
+for p in linux-image-edge-rockchip64 linux-dtb-edge-rockchip64 linux-u-boot-radxa-rock-4d-edge linux-headers-edge-rockchip64; do
   printf 'Package: %s\nStatus: install ok installed\nVersion: 26.11.0-trunk\n\n' "$p"
 done >"$r/var/lib/dpkg/status"
 
@@ -86,6 +88,31 @@ for n in npu@27700000 npu@27708000; do
 done
 : >"$r/dev/accel/accel0"
 chmod 0660 "$r/dev/accel/accel0"
+# Two CPU clusters as on RK3576: four Cortex-A53 (policy0), four Cortex-A72
+# (policy4).
+for n in 0 1 2 3 4 5 6 7; do
+  part=0xd03
+  [[ $n -ge 4 ]] && part=0xd08
+  printf 'processor\t: %s\nCPU part\t: %s\n\n' "$n" "$part"
+done >"$r/proc/cpuinfo"
+for p in policy0 policy4; do
+  d="$r/sys/devices/system/cpu/cpufreq/$p"
+  mkdir -p "$d"
+  if [[ $p == policy0 ]]; then
+    echo "0 1 2 3" >"$d/affected_cpus"
+    f="408000 600000 816000 1008000 1200000 1416000 1608000 1800000 2016000"
+  else
+    echo "4 5 6 7" >"$d/affected_cpus"
+    f="408000 600000 816000 1008000 1200000 1416000 1608000 1800000 2016000 2208000"
+  fi
+  echo "$f" >"$d/scaling_available_frequencies"
+  echo "conservative ondemand userspace powersave performance schedutil" >"$d/scaling_available_governors"
+  echo schedutil >"$d/scaling_governor"
+  echo 408000 >"$d/scaling_min_freq"
+  echo "${f##* }" >"$d/scaling_max_freq"
+done
+mkdir -p "$r/var/lib/dkms/aic8800-usb"
+
 # Name the demo files' owner and group as on a board.
 echo "root:x:$(id -u):$(id -g)::/root:/bin/sh" >"$r/etc/passwd"
 echo "render:x:$(id -g):" >"$r/etc/group"
