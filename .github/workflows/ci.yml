@@ -31,7 +31,9 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p roxora-hwtool-gtk --features test-hooks -- -D warnings
 
       - name: Unit and fake-root tests
         run: cargo test --workspace
@@ -58,18 +60,39 @@ jobs:
           test -f /usr/share/polkit-1/actions/io.github.roxora_os.hwtool.policy
           desktop-file-validate /usr/share/applications/io.github.roxora_os.HwTool.desktop
 
-      - name: Start the GTK app under Xvfb and take screenshots
+      - name: The packaged GTK app ignores the test variables and refuses root
         env:
           GSK_RENDERER: cairo
         run: |
-          tests/gui/demo-root.sh "$RUNNER_TEMP/demo"
+          # Built without test-hooks: HWTOOL_ROOT must have no effect, so the
+          # app reads this runner, which is no board.
           mkdir -p screenshots
+          HWTOOL_ROOT=/nonexistent HWTOOL_GTK_PAGE=kernel \
+            HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/packaged-kernel.png" \
+            timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" hwtool-gtk
+          test -s screenshots/packaged-kernel.png
+          if sudo -E timeout 30 xvfb-run -a hwtool-gtk 2>root.txt; then
+            echo "hwtool-gtk ran as root"; exit 1
+          fi
+          grep -q 'do not run this app as root' root.txt
+
+      - name: Start the GTK app (test-hooks build) under Xvfb and take screenshots
+        env:
+          GSK_RENDERER: cairo
+        run: |
+          cargo build --release -p roxora-hwtool-gtk --features test-hooks --target-dir target-hooks
+          tests/gui/demo-root.sh "$RUNNER_TEMP/demo"
           for page in overlays kernel boot; do
-            HWTOOL_ROOT="$RUNNER_TEMP/demo" HWTOOL_GTK_PAGE="$page" \
-              HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/$page.png" \
-              timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" hwtool-gtk
+            HWTOOL_CLI="$PWD/target/release/hwtool" HWTOOL_ROOT="$RUNNER_TEMP/demo" \
+              HWTOOL_GTK_PAGE="$page" HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/$page.png" \
+              timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" target-hooks/release/hwtool-gtk
             test -s "screenshots/$page.png"
           done
+          HWTOOL_CLI="$PWD/target/release/hwtool" HWTOOL_ROOT="$RUNNER_TEMP/demo" \
+            HWTOOL_GTK_PAGE=kernel HWTOOL_GTK_DEMO_BUSY=1 \
+            HWTOOL_GTK_SCREENSHOT="$PWD/screenshots/busy.png" \
+            timeout 60 xvfb-run -a -s "-screen 0 1280x800x24" target-hooks/release/hwtool-gtk
+          test -s screenshots/busy.png
           ls -l screenshots
 
       - uses: actions/upload-artifact@v4

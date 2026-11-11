@@ -52,9 +52,9 @@ cp /etc/resolv.conf "$r/etc/resolv.conf"
 step "fake Armbian repository and Roxora's pinning"
 "$here/make-fake-repo.sh" "$r/srv/repo"
 echo "deb [trusted=yes] file:/srv/repo ./" >"$r/etc/apt/sources.list.d/armbian.list"
-# The same records as userpatches/roxora/apt/roxora-armbian.pref in
-# roxora-os/build (linux-headers-* added there too).
-cat >"$r/etc/apt/preferences.d/roxora-armbian.pref" <<'END'
+# userpatches/roxora/apt/roxora-hardware.pref.in in roxora-os/build,
+# rendered with @ORIGIN@=Armbian, under the name images install it as.
+cat >"$r/etc/apt/preferences.d/roxora-hardware.pref" <<'END'
 Package: linux-image-* linux-dtb-* linux-headers-* linux-u-boot-* armbian-firmware*
 Pin: release o=Armbian
 Pin-Priority: 500
@@ -102,10 +102,57 @@ grep -qx 'overlays=uart1' "$r/boot/armbianEnv.txt" || fail "overlays= not writte
 in_root hwtool overlays list | grep -q '\[x\] uart1' || fail "uart1 not shown as enabled"
 
 step "dry run changes nothing"
-before="$(in_root dpkg-query -W -f '${Package} ${Version}\n' | sort | sha256sum)"
+state() {
+  in_root dpkg-query -W -f '${Package} ${Version} ${db:Status-Abbrev}\n' | sort
+  find "$r/boot" "$r/var/lib/hwtool" "$r/var/backups/hwtool" "$r/var/log/hwtool" \
+    "$r/etc/apt" -printf '%p %s %T@\n' 2>/dev/null | sort
+}
+before="$(state | sha256sum)"
 in_root hwtool kernel switch vendor --dry-run
-after="$(in_root dpkg-query -W -f '${Package} ${Version}\n' | sort | sha256sum)"
-[[ "$before" == "$after" ]] || fail "dry run changed packages"
+in_root hwtool boot write-bootloader --target spi --dry-run || true
+after="$(state | sha256sum)"
+[[ "$before" == "$after" ]] || fail "dry run changed something"
+
+step "a switch whose package fails is rolled back"
+# A vendor device tree package whose postinst fails, as a broken kernel
+# hook would. hwtool must put everything back.
+b="$(mktemp -d)"
+mkdir -p "$b/boot/dtb-6.1.115-vendor-rk35xx/rockchip" "$b/DEBIAN"
+echo dtb >"$b/boot/dtb-6.1.115-vendor-rk35xx/rockchip/rk3576-rock-4d.dtb"
+printf 'Package: linux-dtb-vendor-rk35xx\nVersion: 26.5.2\nArchitecture: arm64\nMaintainer: Test <test@example.invalid>\nProvides: linux-dtb, armbian-vendor\nDescription: broken on purpose\n' >"$b/DEBIAN/control"
+printf '#!/bin/sh\nrm -rf /boot/dtb\n' >"$b/DEBIAN/preinst"
+printf '#!/bin/sh\necho "test: this postinst fails on purpose" >&2\nexit 1\n' >"$b/DEBIAN/postinst"
+chmod 0755 "$b/DEBIAN/preinst" "$b/DEBIAN/postinst"
+dpkg-deb --root-owner-group --build "$b" "$r/srv/repo/linux-dtb-vendor-rk35xx_26.5.2_arm64.deb" >/dev/null
+reindex "$r/srv/repo"
+in_root apt-get update -q
+cp "$r/boot/armbianEnv.txt" /tmp/env.before-fail
+if in_root hwtool kernel switch vendor --yes >/tmp/fail.txt 2>&1; then
+  cat /tmp/fail.txt
+  fail "the switch with a failing package succeeded"
+fi
+cat /tmp/fail.txt
+grep -q 'done: Put back /boot/armbianEnv.txt' /tmp/fail.txt || fail "armbianEnv.txt not restored"
+grep -q 'done: Purge the vendor packages' /tmp/fail.txt || fail "vendor packages not purged"
+grep -q 'done: Reinstall the old packages' /tmp/fail.txt || fail "old packages not reinstalled"
+grep -q '/boot/Image -> vmlinuz-7.3.4-edge-rockchip64' /tmp/fail.txt || fail "/boot/Image not reported on edge"
+diff -u /tmp/env.before-fail "$r/boot/armbianEnv.txt" || fail "armbianEnv.txt differs after the rollback"
+[[ "$(readlink "$r/boot/Image")" == vmlinuz-7.3.4-edge-rockchip64 ]] || fail "/boot/Image: $(readlink "$r/boot/Image")"
+[[ "$(readlink "$r/boot/dtb")" == dtb-7.3.4-edge-rockchip64 ]] || fail "/boot/dtb: $(readlink "$r/boot/dtb")"
+status="$(in_root dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n')"
+grep linux- <<<"$status"
+for p in linux-image-edge-rockchip64 linux-dtb-edge-rockchip64 linux-u-boot-radxa-rock-4d-edge linux-headers-edge-rockchip64; do
+  grep -q "^ii  $p\$" <<<"$status" || fail "$p is not installed after the rollback"
+done
+if grep -E '^[a-z][a-zA-Z] +linux-[a-z-]*vendor' <<<"$status" | grep -qv '^un'; then
+  fail "vendor packages left after the rollback"
+fi
+in_root hwtool kernel status | tee /tmp/status.txt
+grep -q 'did not finish' /tmp/status.txt || fail "kernel status does not say the switch did not finish"
+ls "$r"/var/log/hwtool/*.log
+rm "$r/srv/repo/linux-dtb-vendor-rk35xx_26.5.2_arm64.deb"
+reindex "$r/srv/repo"
+in_root apt-get update -q
 
 step "no terminal and no --yes: refused"
 if in_root hwtool kernel switch vendor </dev/null; then
@@ -171,7 +218,7 @@ grep -v '^overlays=' "$r/boot/armbianEnv.txt" | diff -u /tmp/env.orig - || fail 
 
 step "one backup per change"
 ls -d "$r"/var/backups/hwtool/*/
-[[ "$(find "$r/var/backups/hwtool" -name armbianEnv.txt | wc -l)" -eq 3 ]] || fail "expected 3 backups"
+[[ "$(find "$r/var/backups/hwtool" -name armbianEnv.txt | wc -l)" -eq 4 ]] || fail "expected 4 backups"
 
 step "boot status"
 in_root hwtool boot status
