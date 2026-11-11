@@ -48,6 +48,9 @@ Every command that changes something:
   refuses unless `--yes` is given;
 - copies a boot configuration file to `/var/backups/hwtool/<time>/`
   before changing it;
+- writes a log to `/var/log/hwtool/<time>.log`, and if a step fails or
+  hwtool is interrupted (Ctrl-C, a closed terminal), runs the plan's cleanup
+  and reports it; a failed kernel switch is rolled back;
 - for a kernel branch switch, saves the packages it replaces as `.deb` files
   in `/var/lib/hwtool/packages/` so `hwtool kernel revert` works even when
   the repository no longer offers them;

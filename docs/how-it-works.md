@@ -10,7 +10,38 @@ already ship. The references below are to
 Everything hwtool reads is resolved against a root directory, so the tests
 run the same code against a fake root filesystem. Every change is first built
 as a plan: a list of steps, each a file write or a command. `--dry-run` prints
-the plan; otherwise hwtool prints it, asks, and runs it.
+the plan and changes nothing; otherwise hwtool prints it, asks, and runs it.
+
+## How a change runs
+
+- **Log.** Each change writes `/var/log/hwtool/<time>.log` with every step
+  and the output of every program it runs.
+- **Output.** Programs run in their own process group, and their output goes
+  through hwtool to the terminal and the log. When the terminal or the GTK
+  app goes away, hwtool's writes fail quietly; the programs never see a
+  broken pipe, so a `dd`, `flashcp` or `dpkg` is never cut off by a closed
+  window.
+- **Signals.** Ctrl-C, SIGHUP and SIGTERM reach hwtool only. It lets the
+  running step finish, then stops and runs the cleanup.
+- **Cleanup.** A plan can carry cleanup steps for failures in a given range
+  of steps (for a kernel switch: from the install on). They all run, even if
+  one fails, and hwtool reports each result.
+- **Files.** A boot configuration file is copied to
+  `/var/backups/hwtool/<time>/` before it changes. Files are replaced by
+  writing a new temporary file (never an existing file or a link), flushing
+  it to disk, renaming it over the old one and flushing the directory.
+- **Same plan.** `--dry-run --json` gives the plan's fingerprint (time stamps
+  left out); `--expect-plan <fingerprint>` makes a run refuse if its own plan
+  differs. The GTK app confirms a dry run made as the user and passes its
+  fingerprint to the run as root.
+- **Which disks are in use.** hwtool traces `/` from `/proc/self/mountinfo`
+  through its device number in `/sys/dev/block` (and through device-mapper
+  slaves) to the disk, and adds the disk of a separate `/boot` and the
+  partition U-Boot loaded the boot script from (`ubootpart=` on the kernel
+  command line). If `/` cannot be traced, commands that write to disks
+  refuse.
+- **Test options.** `--root <dir>` (tests) is refused when hwtool runs with
+  root rights (euid 0, sudo or pkexec).
 
 ## Which board
 
@@ -71,20 +102,30 @@ old one.
 1. checks with `apt-cache policy` that every package of the new branch can be
    installed (Roxora pins the Armbian repository so that only these package
    patterns come from it), and stops if one cannot;
-2. backs up `/boot/armbianEnv.txt`;
-3. saves the packages it is about to replace as `.deb` files in
+2. asks apt what it would do (`apt-get -s install` and `apt-get -s remove`),
+   shows that in the plan, and stops if apt would remove anything other than
+   the old U-Boot package and the old kernel packages;
+3. backs up `/boot/armbianEnv.txt`;
+4. saves the packages it is about to replace as `.deb` files in
    `/var/lib/hwtool/packages/<time>/` (see below);
-4. runs `apt-get update` and `apt-get install` for the new packages;
-5. checks that `/boot/Image` and `/boot/dtb` point at the new branch and that
+5. runs `apt-get update` and records the switch as pending in
+   `/var/lib/hwtool/kernel-history.json`;
+6. runs `apt-get install` for the new packages;
+7. checks that `/boot/Image` and `/boot/dtb` point at the new branch and that
    the device tree U-Boot loads exists (`fdtfile=` in `armbianEnv.txt`, or
    the U-Boot build's `CONFIG_DEFAULT_FDT_FILE` when the file does not set
-   one); if not, it reinstalls the old packages and stops;
-6. sets `overlay_prefix=` for the new branch;
-7. removes the old kernel, device tree and header packages (`--keep-old`
+   one);
+8. sets `overlay_prefix=` for the new branch;
+9. removes the old kernel, device tree and header packages (`--keep-old`
    keeps them);
-8. records the old branch, package versions and saved files in
-   `/var/lib/hwtool/kernel-history.json`, and removes the packages saved by
-   earlier switches.
+10. records the switch as done, and removes the packages saved by earlier
+    switches.
+
+If step 6, 7, 8 or 9 fails, or hwtool is interrupted there, it puts
+`armbianEnv.txt` back from this run's backup, purges the new branch's
+packages, reinstalls the old ones (from the saved files when they exist) and
+prints where `/boot/Image`, `/boot/dtb` and `/boot/uInitrd` point. The
+history entry stays pending; `hwtool kernel status` and `revert` say so.
 
 `hwtool kernel revert` switches back to the recorded branch. For each package
 it asks apt for the recorded version; when the repository no longer offers
@@ -109,6 +150,9 @@ packages conflict) and the old kernel, device tree and header packages
   owned by root in the rebuilt package, as they are in these packages.
   Images are built without an apt cache, so this is the usual case.
 
+The package is written to a temporary file, checked with `dpkg-deb`, and
+only then given its name; a damaged saved file is not used by a revert.
+hwtool needs about twice the packages' installed size free before it starts.
 `--dry-run` shows for each package whether it is copied or rebuilt and how
 much space the files take.
 
@@ -128,9 +172,15 @@ defines the functions that write them (`uboot.sh`, the part that writes
   SPI flash, on boards whose U-Boot is built for it.
 
 hwtool sources that file and calls these functions. For `--dry-run` and for
-the confirmation it first runs them with `dd` and `flashcp` replaced by
-functions that only print their arguments, so the plan shows the exact
-commands, for example on a Radxa ROCK 4D:
+the confirmation it first runs them without writing anything: in restricted
+bash (no command names with a slash, no output redirection, no exec, PATH
+read-only), as user nobody when hwtool runs as root, with a PATH that holds
+only shims. The `dd` and `flashcp` shims print their arguments; a few
+read-only tools pass through; any other command, and any error output, makes
+hwtool refuse, because it could not show what would happen. Every printed
+line must parse completely (all `dd` operands and size suffixes, including
+`oflag=seek_bytes`) and must write exactly the requested device. The plan
+then shows the exact commands, for example on a Radxa ROCK 4D:
 
     dd if=/usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip.bin of=/dev/mmcblk0 bs=32k seek=1 conv=notrunc status=none
     flashcp -v -p /usr/lib/linux-u-boot-edge-radxa-rock-4d/u-boot-rockchip-spi.bin /dev/mtd0
@@ -143,7 +193,13 @@ flash it checks that the kernel shows an MTD device and that `flashcp`
 (package `mtd-utils`) is installed.
 
 The ArmSoM CM5-IO U-Boot package has no SPI writer, so `--target spi` is not
-available there.
+available there. On the ROCK 4D the writer always writes `/dev/mtd0`, and
+the plan names that device.
+
+The `u-boot-rockchip.bin` of both boards (9.1 MiB, written at 32 KiB) covers
+sectors 64 to about 18740. Its bytes for sectors 7168 to 16383, where Rockchip
+vendor storage (`DVKR`, `SSKR`) can live, are all 0xff padding: writing U-Boot
+to an eMMC overwrites that window, whatever the migration kept before.
 
 ## Moving the system to eMMC or NVMe
 
@@ -155,7 +211,7 @@ armbian-config, so hwtool runs the same steps itself. They follow
 
 | configng | hwtool |
 | --- | --- |
-| pre-flight checks | refuses before anything is written: target is the running disk, mounted, not eMMC or NVMe, too small, a tool or the U-Boot writer is missing |
+| pre-flight checks | refuses before anything is written: the running system's disks cannot be traced, the target is one of them, mounted, not eMMC or NVMe, too small (used space of `/` and `/boot`, the space before the first partition, 256 MiB spare; no number, no migration), `/` is not ext4, a tool or the U-Boot writer is missing |
 | `install_plan_layout` | one ext4 partition, starting at 16 MiB on eMMC (room for U-Boot) and 1 MiB on NVMe, same partition table type as the boot disk |
 | `install_apply_partitions` | `wipefs`, zero the start of the disk (keeping the Rockchip vendor storage at sectors 7168 to 16383 if it is there), `parted mklabel`, `mkpart`, `legacy_boot` flag |
 | `install_make_filesystems` | `mkfs.ext4 -qF` |
@@ -163,15 +219,25 @@ armbian-config, so hwtool runs the same steps itself. They follow
 | `install_populate_boot` | `rsync -aq --exclude 'efi/**' /boot/` |
 | `install_gen_fstab` | the `/` line of the copied `/etc/fstab` gets the new UUID; other lines stay |
 | `install_rewrite_bootenv` | `rootdev=UUID=...` and `rootfstype=ext4` in the copy's `armbianEnv.txt` |
-| `install_write_bootloader` | eMMC: `write_uboot_platform`; NVMe with `--write-spi`: `write_uboot_platform_mtd` |
 | `install_verify_boot_dir`, `install_verify_fstab` | the copy's `/boot` has a kernel and `boot.scr`; every UUID in its fstab exists |
+| `install_write_bootloader` | after the check (configng writes it before): eMMC: `write_uboot_platform`; NVMe with `--write-spi`: `write_uboot_platform_mtd` |
 
 The running system and the SD card are not changed. If a step fails, hwtool
-unmounts the target and stops.
+unmounts the target; if the U-Boot write to the eMMC fails, it zeroes the
+range that write covered, so the board does not try to start a partial
+U-Boot.
 
 ## The GTK app
 
-`hwtool-gtk` runs as the user. It reads state with `hwtool --json`, shows the
-output of `hwtool ... --dry-run` in a confirmation dialog, and runs the
-change with `pkexec /usr/bin/hwtool ... --yes`. The polkit action
-`io.github.roxora_os.hwtool.run` asks for an administrator password.
+`hwtool-gtk` runs as the user and refuses to run as root. It reads state
+with `hwtool --json`, shows the output of `hwtool ... --dry-run` in a
+confirmation dialog, and runs the change with
+`pkexec /usr/bin/hwtool ... --yes --expect-plan <fingerprint>`, so what runs
+is what was confirmed. The polkit action `io.github.roxora_os.hwtool.run`
+asks for an administrator password. While a change runs, the pages are
+insensitive, a banner says not to switch the board off, and the window
+cannot be closed. Names (overlays, branches) are passed after `--`.
+
+The variables HWTOOL_CLI, HWTOOL_ROOT and HWTOOL_GTK_NO_PKEXEC exist only in
+builds with the `test-hooks` feature, which CI uses for screenshots and
+release packages do not.
