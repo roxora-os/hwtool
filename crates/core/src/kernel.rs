@@ -66,6 +66,13 @@ fn branch_packages(board: &Board, branch: &str) -> Vec<String> {
     ]
 }
 
+/// The branch packages plus headers, for showing what is installed.
+fn shown_packages(board: &Board, branch: &str) -> Vec<String> {
+    let mut v = branch_packages(board, branch);
+    v.push(board.headers_package(branch));
+    v
+}
+
 /// `vmlinuz-7.3.4-edge-rockchip64` -> `7.3.4-edge-rockchip64`.
 fn next_kernel(root: &Root) -> Option<String> {
     let t = root.read_link("/boot/Image")?;
@@ -81,7 +88,7 @@ pub fn status(root: &Root) -> Result<Status> {
         .branches
         .iter()
         .map(|b| {
-            let packages = branch_packages(&board, b);
+            let packages = shown_packages(&board, b);
             BranchInfo {
                 installed: installed
                     .iter()
@@ -147,8 +154,17 @@ pub fn switch_plan(
             board.branches.join(", ")
         );
     }
-    let new = branch_packages(board, target);
     let installed = dpkg::installed(root);
+    let mut new = branch_packages(board, target);
+    // Headers are installed only where DKMS modules need them. When the
+    // running branch has them, the new branch gets its own.
+    let has_headers = board
+        .branches
+        .iter()
+        .any(|b| installed.iter().any(|p| p.name == board.headers_package(b)));
+    if has_headers {
+        new.push(board.headers_package(target));
+    }
     if st.current.as_deref() == Some(target)
         && new.iter().all(|n| installed.iter().any(|p| &p.name == n))
     {
@@ -177,7 +193,7 @@ pub fn switch_plan(
         );
     }
 
-    // Kernel and DTB packages of the other branches. Old U-Boot packages
+    // Kernel, DTB and header packages of the other branches. Old U-Boot packages
     // are replaced by apt because they all conflict on armbian-u-boot.
     let old: Vec<Package> = installed
         .iter()
@@ -190,6 +206,7 @@ pub fn switch_plan(
                     p.name == board.image_package(b)
                         || p.name == board.dtb_package(b)
                         || p.name == board.uboot_package(b)
+                        || p.name == board.headers_package(b)
                 })
         })
         .cloned()

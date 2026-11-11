@@ -142,6 +142,11 @@ impl Board {
         format!("linux-dtb-{branch}-{}", self.family_for(branch))
     }
 
+    /// linux-headers-<branch>-<family> (kernel-debs.sh).
+    pub fn headers_package(&self, branch: &str) -> String {
+        format!("linux-headers-{branch}-{}", self.family_for(branch))
+    }
+
     /// The U-Boot package puts the board before the branch.
     pub fn uboot_package(&self, branch: &str) -> String {
         format!("linux-u-boot-{}-{branch}", self.board)

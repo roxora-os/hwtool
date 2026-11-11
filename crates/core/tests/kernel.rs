@@ -348,3 +348,38 @@ fn fdtfile_falls_back_to_uboot_default() {
         Some("rockchip/rk3576-armsom-cm5-io.dtb")
     );
 }
+
+#[test]
+fn headers_follow_the_branch_when_installed() {
+    let f = rock4d();
+    f.status(&[
+        ("linux-image-edge-rockchip64", "26.11.0-trunk"),
+        ("linux-dtb-edge-rockchip64", "26.11.0-trunk"),
+        ("linux-headers-edge-rockchip64", "26.11.0-trunk"),
+        ("linux-u-boot-radxa-rock-4d-edge", "26.11.0-trunk"),
+    ]);
+    let mut avail = VENDOR_PKGS.to_vec();
+    avail.push(("linux-headers-vendor-rk35xx", "26.5.1"));
+    let mut apt = FakeApt {
+        f: &f,
+        available: avail,
+        ran: vec![],
+    };
+    let plan = kernel::switch_plan(&f.root(), &mut apt, "vendor", false, &BTreeMap::new()).unwrap();
+    let text = plan.render();
+    assert!(
+        text.contains("linux-u-boot-radxa-rock-4d-vendor linux-headers-vendor-rk35xx\n"),
+        "{text}"
+    );
+    assert!(text.contains("$ apt-get remove -y linux-image-edge-rockchip64 linux-dtb-edge-rockchip64 linux-headers-edge-rockchip64\n"), "{text}");
+    plan.execute(&f.root(), &mut apt, "T").unwrap();
+    let names: Vec<String> = dpkg::installed(&f.root())
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(
+        names.contains(&"linux-headers-vendor-rk35xx".to_string()),
+        "{names:?}"
+    );
+    assert!(!names.iter().any(|n| n.contains("edge")), "{names:?}");
+}
