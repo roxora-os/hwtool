@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
-use hwtool_core::{kernel, migrate, npu, overlays, Root};
+use hwtool_core::{bootenv, cpu, kernel, migrate, npu, overlays, Root};
 
 // Output never panics: when the terminal or the pipe to the GTK app is
 // gone, writes fail quietly and the change runs to its end or its cleanup.
@@ -71,6 +71,12 @@ enum Command {
     /// The NPU and charsiu, the LLM runtime for it.
     #[command(subcommand)]
     Npu(NpuCmd),
+    /// Boot options in /boot/armbianEnv.txt.
+    #[command(subcommand)]
+    Bootenv(BootenvCmd),
+    /// CPU frequency per cluster.
+    #[command(subcommand)]
+    Cpu(CpuCmd),
 }
 
 #[derive(Subcommand)]
@@ -107,6 +113,18 @@ enum OverlayCmd {
         #[command(flatten)]
         change: Change,
     },
+    /// Compile a .dts or .dtso overlay, install it in /boot/overlay-user and enable it.
+    Add {
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Disable a user overlay and delete it from /boot/overlay-user.
+    Remove {
+        name: String,
+        #[command(flatten)]
+        change: Change,
+    },
 }
 
 #[derive(Subcommand)]
@@ -129,6 +147,71 @@ enum KernelCmd {
         #[command(flatten)]
         change: Change,
     },
+    /// Install or remove the kernel headers of the branch in use (DKMS needs them).
+    Headers {
+        #[arg(value_parser = ["install", "remove"])]
+        action: String,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Hold the kernel, device tree, U-Boot and firmware packages (apt-mark hold).
+    Hold {
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Release the held packages.
+    Unhold {
+        #[command(flatten)]
+        change: Change,
+    },
+}
+
+#[derive(Subcommand)]
+enum BootenvCmd {
+    /// Show the boot options boot.scr reads and the kernel command line it builds.
+    Show,
+    /// Set an option, for example verbosity=7 or console=serial.
+    Set {
+        assignment: String,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Remove an option, so boot.scr uses its default.
+    Unset {
+        key: String,
+        #[command(flatten)]
+        change: Change,
+    },
+}
+
+#[derive(Subcommand)]
+enum CpuCmd {
+    /// Show each CPU cluster's governor and frequency range.
+    Show,
+    /// Set a cluster's governor or frequency range, now and at every boot.
+    Set {
+        /// The cpufreq policy, for example policy0 (see `hwtool cpu show`).
+        #[arg(long)]
+        policy: String,
+        #[arg(long)]
+        governor: Option<String>,
+        /// Lowest frequency in kHz.
+        #[arg(long)]
+        min: Option<u64>,
+        /// Highest frequency in kHz.
+        #[arg(long)]
+        max: Option<u64>,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Remove hwtool's CPU settings (the kernel defaults return at the next boot).
+    Reset {
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Apply /etc/hwtool/cpufreq.conf now (run at boot by hwtool-cpufreq.service).
+    #[command(hide = true)]
+    Apply,
 }
 
 #[derive(Subcommand)]
@@ -245,6 +328,128 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Command::Kernel(KernelCmd::Revert { keep_old, change }) => {
             let p = kernel::revert_plan(&root, &mut exec, *keep_old)?;
             apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Kernel(KernelCmd::Headers { action, change }) => {
+            let p = kernel::headers_plan(&root, &mut exec, action == "install")?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Kernel(KernelCmd::Hold { change }) => {
+            let p = kernel::hold_plan(&root, true)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Kernel(KernelCmd::Unhold { change }) => {
+            let p = kernel::hold_plan(&root, false)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Overlays(OverlayCmd::Add { file, change }) => {
+            let file = std::fs::canonicalize(file)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+            let p = overlays::add_plan(&root, &mut exec, &file.display().to_string())?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Overlays(OverlayCmd::Remove { name, change }) => {
+            let p = overlays::remove_plan(&root, name)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Bootenv(BootenvCmd::Show) => {
+            let st = bootenv::status(&root)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                for o in &st.options {
+                    outln!(
+                        "{:<22} {:<10} {}",
+                        o.key,
+                        o.value
+                            .clone()
+                            .or_else(|| o.default.clone().map(|d| format!("({d})")))
+                            .unwrap_or_else(|| "-".into()),
+                        o.help
+                    );
+                }
+                outln!("(values in parentheses are boot.scr's defaults)");
+                match &st.cmdline {
+                    Some(c) => outln!("Kernel command line: {c}"),
+                    None => outln!("Kernel command line: hwtool cannot follow this boot.cmd"),
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Bootenv(BootenvCmd::Set { assignment, change }) => {
+            let p = bootenv::set_plan(&root, assignment)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Bootenv(BootenvCmd::Unset { key, change }) => {
+            let p = bootenv::unset_plan(&root, key)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Cpu(CpuCmd::Show) => {
+            let st = cpu::status(&root)?;
+            if cli.json {
+                print_json(&st)?;
+            } else {
+                for p in &st.policies {
+                    outln!(
+                        "{} (CPUs {}{}): {}, {} to {} MHz",
+                        p.name,
+                        p.cpus
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        if p.core.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", {}", p.core)
+                        },
+                        p.governor,
+                        p.min_khz / 1000,
+                        p.max_khz / 1000
+                    );
+                    outln!("  governors: {}", p.governors.join(" "));
+                    outln!(
+                        "  frequencies (MHz): {}",
+                        p.frequencies_khz
+                            .iter()
+                            .map(|f| (f / 1000).to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+                outln!(
+                    "Applied at boot: {}",
+                    if st.persistent {
+                        cpu::CONF
+                    } else {
+                        "no (kernel defaults)"
+                    }
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Cpu(CpuCmd::Set {
+            policy,
+            governor,
+            min,
+            max,
+            change,
+        }) => {
+            let p = cpu::set_plan(&root, policy, governor.as_deref(), *min, *max)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Cpu(CpuCmd::Reset { change }) => {
+            let p = cpu::reset_plan(&root)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Cpu(CpuCmd::Apply) => {
+            // Run by hwtool-cpufreq.service: applies what the user set before.
+            let p = cpu::apply_plan(&root)?;
+            let change = Change {
+                dry_run: false,
+                yes: true,
+                expect_plan: None,
+            };
+            apply(cli, &root, &mut exec, p, change)
         }
         Command::Npu(NpuCmd::Status) => {
             let st = npu::status(&root, &mut exec)?;
@@ -437,6 +642,17 @@ fn print_kernel(st: &kernel::Status) {
                 .collect();
             outln!("  {mark} {:<8} {}", b.branch, v.join(", "));
         }
+    }
+    if st.held.is_empty() {
+        outln!("Held packages: none (apt upgrades the kernel)");
+    } else {
+        outln!(
+            "Held packages: {} (hwtool kernel unhold releases them)",
+            st.held.join(", ")
+        );
+    }
+    if !st.dkms.is_empty() {
+        outln!("DKMS modules: {}", st.dkms.join(", "));
     }
     if let Some(h) = st.history.last() {
         outln!(
