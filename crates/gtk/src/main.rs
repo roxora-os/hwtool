@@ -13,7 +13,8 @@
 //! AdwPreferencesPage, AdwSwitchRow, AdwComboRow, AdwExpanderRow,
 //! AdwStatusPage and AdwAlertDialog.
 //!
-//! Environment: HWTOOL_GTK_PAGE (board, overlays, kernel, boot, cpu or npu),
+//! Environment: HWTOOL_GTK_PAGE (board, overlays, kernel, boot, cpu or npu;
+//! "boot" is the Boot page: boot options, devices, bootloader, migration),
 //! HWTOOL_GTK_SIZE (WIDTHxHEIGHT), HWTOOL_GTK_DARK=1, HWTOOL_GTK_EXIT_AFTER_MS
 //! and HWTOOL_GTK_SCREENSHOT (save the window as PNG to that path, then
 //! quit). Built with the `test-hooks` feature only, for CI: HWTOOL_CLI,
@@ -163,7 +164,17 @@ fn build_ui(app: &adw::Application) {
         })
         .unwrap_or((900, 700));
     let stack = adw::ViewStack::new();
+    gtk::Window::set_default_icon_name(APP_ID);
     let header = adw::HeaderBar::new();
+    let menu = gio::Menu::new();
+    menu.append(Some("About Hardware Tool"), Some("app.about"));
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("Main Menu")
+        .primary(true)
+        .build();
+    header.pack_end(&menu_button);
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
         .policy(adw::ViewSwitcherPolicy::Wide)
@@ -183,6 +194,7 @@ fn build_ui(app: &adw::Application) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
+        .icon_name(APP_ID)
         .title("Hardware Tool")
         .default_width(w)
         .default_height(h)
@@ -199,6 +211,21 @@ fn build_ui(app: &adw::Application) {
     narrow.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
     window.add_breakpoint(narrow);
 
+    let about = gio::SimpleAction::new("about", None);
+    let win_about = window.clone();
+    about.connect_activate(move |_, _| {
+        adw::AboutDialog::builder()
+            .application_name("Hardware Tool")
+            .application_icon(APP_ID)
+            .developer_name("Roxora Project")
+            .version(env!("CARGO_PKG_VERSION"))
+            .website("https://github.com/roxora-os/hwtool")
+            .issue_url("https://github.com/roxora-os/hwtool/issues")
+            .license_type(gtk::License::Gpl20Only)
+            .build()
+            .present(Some(&win_about));
+    });
+    app.add_action(&about);
     let (cli, root, pkexec) = hooks();
     let ctx: Shared = Rc::new(Ctx {
         window: window.clone(),
@@ -215,7 +242,7 @@ fn build_ui(app: &adw::Application) {
         ("board", "Board", "computer-symbolic"),
         ("overlays", "Overlays", "view-list-symbolic"),
         ("kernel", "Kernel", "emblem-system-symbolic"),
-        ("boot", "Storage", "drive-harddisk-symbolic"),
+        ("boot", "Boot", "drive-harddisk-symbolic"),
         ("cpu", "CPU", "power-profile-performance-symbolic"),
         ("npu", "NPU", "applications-science-symbolic"),
     ] {
@@ -729,9 +756,6 @@ fn board_page(ctx: &Shared) {
         device_rows(&g, &boot);
         page.add(&g);
     }
-    if let Ok(be) = json(ctx, &["bootenv", "show"]) {
-        boot_options(ctx, &page, &be);
-    }
     show(&holder, &page);
 }
 
@@ -846,7 +870,7 @@ fn boot_options(ctx: &Shared, page: &adw::PreferencesPage, be: &Value) {
     let (r, b) = action_row(
         "Apply boot options",
         "Backs up armbianEnv.txt first",
-        "Apply…",
+        "Apply",
         "",
     );
     g.add(&r);
@@ -954,7 +978,7 @@ fn cpu_page(ctx: &Shared) {
             g.add(&min);
             g.add(&max);
         }
-        let (r, b) = action_row("Apply", "Now and at every boot", "Apply…", "");
+        let (r, b) = action_row("Apply", "Now and at every boot", "Apply", "");
         g.add(&r);
         page.add(&g);
         let ctx2 = ctx.clone();
@@ -983,7 +1007,7 @@ fn cpu_page(ctx: &Shared) {
         let (r, b) = action_row(
             "Settings applied at boot",
             "/etc/hwtool/cpufreq.conf",
-            "Reset…",
+            "Reset",
             "destructive-action",
         );
         g.add(&r);
@@ -1238,7 +1262,7 @@ fn kernel_page(ctx: &Shared) {
             .title("Keep the old kernel installed")
             .subtitle("Lets you boot the old kernel again by hand if the new one does not start")
             .build();
-        let (r, b) = action_row("Switch", "Needs a reboot", "Switch…", "");
+        let (r, b) = action_row("Switch", "Needs a reboot", "Switch", "");
         g.add(&combo);
         g.add(&keep);
         g.add(&r);
@@ -1278,7 +1302,7 @@ fn kernel_page(ctx: &Shared) {
                     s(h, "to_branch")
                 )
             },
-            "Revert…",
+            "Revert",
             "",
         );
         if pending {
@@ -1319,8 +1343,8 @@ fn kernel_page(ctx: &Shared) {
         g.add(&info("DKMS modules", &dkms.join(", ")));
     }
     let (r, b) = match &headers_installed {
-        Some(v) => action_row("Kernel headers", v, "Remove…", "destructive-action"),
-        None => action_row("Kernel headers", "Not installed", "Install…", ""),
+        Some(v) => action_row("Kernel headers", v, "Remove", "destructive-action"),
+        None => action_row("Kernel headers", "Not installed", "Install", ""),
     };
     g.add(&r);
     let install = headers_installed.is_none();
@@ -1353,12 +1377,12 @@ fn kernel_page(ctx: &Shared) {
         Some("Holding keeps apt from upgrading the kernel, device tree, U-Boot and firmware packages. Kernel security fixes do not arrive while they are held."),
     );
     let (r, b) = if held.is_empty() {
-        action_row("Kernel packages", "Upgraded by apt", "Hold…", "")
+        action_row("Kernel packages", "Upgraded by apt", "Hold", "")
     } else {
         let r = action_row(
             "Kernel packages",
             &format!("Held: {}", held.join(", ")),
-            "Release…",
+            "Release",
             "",
         );
         r.0.add_prefix(&icon("changes-prevent-symbolic"));
@@ -1394,6 +1418,9 @@ fn boot_page(ctx: &Shared) {
         }
     };
     let page = adw::PreferencesPage::new();
+    if let Ok(be) = json(ctx, &["bootenv", "show"]) {
+        boot_options(ctx, &page, &be);
+    }
     let g = group("Devices", None);
     device_rows(&g, &st);
     page.add(&g);
@@ -1436,7 +1463,7 @@ fn boot_page(ctx: &Shared) {
             .title("Allow the device the system runs from")
             .subtitle("Replaces the bootloader this system starts with")
             .build();
-        let (r, b) = action_row("Write bootloader", "", "Write…", "destructive-action");
+        let (r, b) = action_row("Write bootloader", "", "Write", "destructive-action");
         g.add(&combo);
         g.add(&booted);
         g.add(&r);
@@ -1482,7 +1509,7 @@ fn boot_page(ctx: &Shared) {
         let (r, b) = action_row(
             "Erase and copy",
             "Everything on the chosen drive is lost",
-            "Erase…",
+            "Erase",
             "destructive-action",
         );
         g.add(&combo);
@@ -1627,7 +1654,7 @@ fn npu_page(ctx: &Shared) {
             let (r, b) = action_row(
                 &format!("charsiu {v} is installed"),
                 "",
-                "Remove…",
+                "Remove",
                 "destructive-action",
             );
             g.add(&r);
@@ -1653,7 +1680,7 @@ fn npu_page(ctx: &Shared) {
                 } else {
                     "apt has no charsiu package: is the Armbian repository enabled?"
                 },
-                "Install…",
+                "Install",
                 "suggested-action",
             );
             b.set_sensitive(can);
