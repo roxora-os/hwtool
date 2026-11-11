@@ -32,6 +32,7 @@ pub mod root;
 pub mod signals;
 pub mod storage;
 pub mod thermal;
+pub mod wifi;
 
 pub use root::Root;
 
