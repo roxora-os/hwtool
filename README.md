@@ -8,8 +8,15 @@ hwtool changes the hardware settings of a board running a
 2. **Kernel branch**: switch between the kernel branches the board supports
    (for example `edge` and `vendor`), and go back.
 3. **Boot storage**: write the bootloader to SPI flash or eMMC, and move the
-   running system from an SD card to eMMC or NVMe.
-4. **NPU**: show whether the NPU can run
+   running system from an SD card to eMMC, NVMe or (with U-Boot in SPI
+   flash) a USB drive.
+4. **Kernel headers and holding**: install or remove the headers DKMS
+   needs, and hold the kernel, device tree, U-Boot and firmware packages.
+5. **Boot options**: the `armbianEnv.txt` keys `boot.scr` reads (log
+   level, console, splash, extra kernel arguments), checked.
+6. **CPU frequency**: governor and frequency range per CPU cluster,
+   applied at every boot.
+7. **NPU**: show whether the NPU can run
    [charsiu](https://github.com/gahingwoo/charsiu) (the `rocket` driver, the
    NPU device tree nodes, `/dev/accel`), and install or remove charsiu.
 
@@ -32,13 +39,23 @@ hwtool info                                  # board, kernel branch, disks
 hwtool overlays list
 sudo hwtool overlays enable uart1
 sudo hwtool overlays disable uart1
+sudo hwtool overlays add my-sensor.dtso        # compile, install, enable
+sudo hwtool overlays remove my-sensor
 hwtool kernel status
 sudo hwtool kernel switch vendor
 sudo hwtool kernel revert                    # back to the branch before the last switch
+sudo hwtool kernel headers install           # or remove
+sudo hwtool kernel hold                      # or unhold
+hwtool bootenv show
+sudo hwtool bootenv set verbosity=7          # or: bootenv unset verbosity
+hwtool cpu show
+sudo hwtool cpu set --policy policy4 --governor ondemand --max 1800000
+sudo hwtool cpu reset
 hwtool boot status
 sudo hwtool boot write-bootloader --target spi
 sudo hwtool boot write-bootloader --target /dev/mmcblk0
 sudo hwtool boot migrate --target /dev/nvme0n1 --write-spi
+sudo hwtool boot migrate --target /dev/sda --write-spi   # USB drive, ROCK 4D
 hwtool npu status
 sudo hwtool npu install-charsiu                # then: charsiu pull
 sudo hwtool npu remove-charsiu

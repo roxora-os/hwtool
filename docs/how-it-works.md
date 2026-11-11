@@ -63,10 +63,19 @@ file is missing it recognises the board from the installed
 
 `hwtool overlays list` lists the `.dtbo` files these rules can find.
 `enable` and `disable` change only the `overlays=` or `user_overlays=` line;
-other lines, comments and their order stay as they are. A user overlay is
-compiled and copied to `/boot/overlay-user` with `armbian-add-overlay`, which
-the board support package ships; hwtool then enables and disables it like any
-other.
+other lines, comments and their order stay as they are.
+
+`hwtool overlays add FILE.dts|FILE.dtso` does what `armbian-add-overlay`
+does, without the C preprocessor: it compiles the file with `dtc -@`
+(installing `device-tree-compiler` from Ubuntu first if `dtc` is missing),
+checks the `compatible` at the overlay's root against the board's
+(`/proc/device-tree/compatible`), installs it as
+`/boot/overlay-user/<name>.dtbo` and adds it to `user_overlays=`. Files with
+`#include` need the kernel headers and are left to `armbian-add-overlay`.
+The plan names the file with a checksum of its content, so a file changed
+after the confirmation gives a different plan. `overlays remove NAME`
+disables a user overlay and deletes its file after a backup; kernel overlays
+can only be disabled.
 
 The prefixes depend on the kernel branch. Mainline kernels name RK3576
 overlays `rockchip-rk3576-*.dtbo`, vendor kernels `rk3576-*.dtbo`
@@ -159,6 +168,62 @@ much space the files take.
 The switch installs the new U-Boot package but does not write it to the boot
 device; `hwtool boot write-bootloader` does that.
 
+### Headers and holding
+
+`hwtool kernel headers install|remove` installs or removes
+`linux-headers-<branch>-<family>` for the branch in use; Roxora's pinning
+allows headers from the Armbian repository. The plan shows `apt-get -s` and
+stops on removals other than the headers. DKMS (the ROCK 4D's `aic8800`
+Wi-Fi and Bluetooth driver) builds its modules against the headers for each
+new kernel, so removing them warns that DKMS modules will be missing from
+the next kernel.
+
+`hwtool kernel hold|unhold` runs `apt-mark hold|unhold` on the board's
+installed kernel, device tree, header, U-Boot and `armbian-firmware*`
+packages. dpkg records a hold as `hold ok installed`; `kernel status` and
+the Kernel page list held packages. `kernel switch` refuses while they are
+held, rather than releasing them itself, so a hold is only undone on
+purpose.
+
+## Boot options
+
+`/boot/boot.cmd` (`config/bootscripts/boot-rk3576.cmd`) imports
+`armbianEnv.txt` and builds the kernel command line:
+
+    root=${rootdev} rootwait rootfstype=${rootfstype} ${consoleargs} consoleblank=0
+    loglevel=${verbosity} ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks}
+    ${extraargs} ${extraboardargs}
+
+with `consoleargs` from `console` (`serial`: `console=ttyS0,1500000`,
+`display`: `console=tty1`, `both`), `earlycon` (`on` adds `earlycon`) and
+`bootlogo` (`true`: `splash`, otherwise `splash=verbose`), and the cgroup
+options when `docker_optimizations=on`.
+
+`hwtool bootenv` sets only keys that `boot.cmd` reads, each with a check:
+`verbosity` 0 to 7, `console` serial, display or both, `bootlogo`
+true/false, `earlycon` and `docker_optimizations` on/off, `extraargs` without
+quotes, backslashes, `;`, `$`, backquotes or control characters (512
+characters at most), `usbstoragequirks` as `VID:PID:FLAGS`. `rootdev`,
+`rootfstype`, `fdtfile` and the overlay keys belong to other commands and
+are refused. `bootenv show` prints the values, `boot.cmd`'s defaults for
+unset keys, and the command line as `boot.scr` builds it. Changes are backed
+up and written durably like every other boot configuration change.
+
+## CPU frequency
+
+Each `/sys/devices/system/cpu/cpufreq/policy*` is a cluster (RK3576:
+policy0 for the four Cortex-A53, policy4 for the four Cortex-A72; the core
+names come from the CPU part in `/proc/cpuinfo`). `hwtool cpu set` accepts
+only governors from `scaling_available_governors` and frequencies from
+`scaling_available_frequencies`, writes `/etc/hwtool/cpufreq.conf`, installs
+and enables `hwtool-cpufreq.service` (a oneshot that runs `hwtool cpu apply`
+at boot), and writes the values to sysfs now (the maximum first when
+raising, the minimum first when lowering). `cpu reset` removes the file and
+the unit; the kernel's defaults return at the next boot. Roxora images drop
+Armbian's `/etc/default/cpufrequtils` and `armbian-hardware-optimize`, so
+nothing else sets the governor. The `performance` governor, or a minimum at
+the top frequency, gets a warning about heat.
+
 ## Writing the bootloader
 
 The U-Boot package installs its binaries in
@@ -221,6 +286,26 @@ armbian-config, so hwtool runs the same steps itself. They follow
 | `install_rewrite_bootenv` | `rootdev=UUID=...` and `rootfstype=ext4` in the copy's `armbianEnv.txt` |
 | `install_verify_boot_dir`, `install_verify_fstab` | the copy's `/boot` has a kernel and `boot.scr`; every UUID in its fstab exists |
 | `install_write_bootloader` | after the check (configng writes it before): eMMC: `write_uboot_platform`; NVMe with `--write-spi`: `write_uboot_platform_mtd` |
+
+**USB and SATA drives.** U-Boot on the SD card or eMMC checks those first
+and starts them, so a USB or SATA drive can hold the system only when U-Boot
+runs from SPI flash. hwtool reads the facts from the installed U-Boot
+package: the SPI writer (`write_uboot_platform_mtd`), the build
+configuration (`u-boot-config-target-*`: `CONFIG_USB_STORAGE=y` for USB,
+`CONFIG_AHCI`, `CONFIG_SATA` or `CONFIG_DWC_AHCI` for SATA) and the
+`boot_targets` in the SPI image (`usb`, or `scsi` for AHCI). It needs
+`--write-spi`, so the U-Boot in SPI flash is the package's. At the pinned
+commit:
+
+| Board | U-Boot | USB | SATA | boot_targets |
+| --- | --- | --- | --- | --- |
+| Radxa ROCK 4D | v2026.04, SPI image | `CONFIG_USB_STORAGE=y`, xHCI, DWC3 | no `CONFIG_AHCI` | `mmc0 mmc1 scsi nvme usb pxe dhcp` |
+| ArmSoM CM5-IO | v2026.10, on SD or eMMC only | `CONFIG_USB_STORAGE=y` | no `CONFIG_AHCI` | `mmc1 mmc0 nvme scsi usb pxe dhcp spi` |
+
+So the ROCK 4D can start from USB (after the SD card, the eMMC, SCSI/UFS and
+NVMe: anything bootable there starts first), SATA is refused on both, and
+the CM5-IO is refused for USB: its U-Boot is built with USB storage, but it
+lives on the SD card or eMMC, which it checks before USB.
 
 The running system and the SD card are not changed. If a step fails, hwtool
 unmounts the target; if the U-Boot write to the eMMC fails, it zeroes the
