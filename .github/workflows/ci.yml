@@ -21,7 +21,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev dpkg-dev xvfb xauth desktop-file-utils appstream
+            libgtk-4-dev libadwaita-1-dev dpkg-dev xvfb xauth desktop-file-utils appstream \
+            device-tree-compiler python3
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -37,6 +38,9 @@ jobs:
 
       - name: Unit and fake-root tests
         run: cargo test --workspace
+
+      - name: Header interface overlays against the boards' DTBs
+        run: python3 tests/interfaces/check.py
 
       - name: Build release binaries
         run: cargo build --release --workspace
@@ -71,6 +75,15 @@ jobs:
           test "$(stat -c %Y /usr/share/icons/hicolor/icon-theme.cache)" -ge \
             "$(stat -c %Y /usr/share/icons/hicolor/scalable/apps/$app.svg)"
           dpkg -L roxora-hwtool-gtk
+          # The installed overlays apply to the boards' DTBs.
+          for b in radxa-rock-4d:rk3576-rock-4d armsom-cm5-io:rk3576-armsom-cm5-io; do
+            d=/usr/share/hwtool/interfaces/${b%%:*}
+            test -s $d/index.json
+            for o in $d/*.dtbo; do
+              fdtoverlay -i tests/interfaces/dtb/${b#*:}.dtb -o /tmp/applied.dtb $o
+            done
+            echo "${b%%:*}: $(ls $d/*.dtbo | wc -l) overlays apply"
+          done
 
       - name: The packaged GTK app ignores the test variables and refuses root
         env:

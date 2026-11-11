@@ -3,7 +3,7 @@
 #
 # Build the two Debian packages from binaries cargo has already built:
 #
-#   roxora-hwtool      /usr/bin/hwtool, no GUI dependencies
+#   roxora-hwtool      /usr/bin/hwtool and its overlays, no GUI dependencies
 #   roxora-hwtool-gtk  /usr/bin/hwtool-gtk, desktop file, polkit policy
 #
 # Usage: packaging/build-debs.sh [target dir] [output dir]
@@ -55,12 +55,23 @@ END
 
 cli="$work/roxora-hwtool"
 install -D -m 0755 "$target/release/hwtool" "$cli/usr/bin/hwtool"
+# Pin header interface overlays (data/interfaces, written by
+# tools/gen-interfaces.py and checked by tests/interfaces/check.py).
+for dir in "$top"/data/interfaces/*/; do
+  board="$(basename "$dir")"
+  dest="$cli/usr/share/hwtool/interfaces/$board"
+  install -D -m 0644 "$dir/index.json" "$dest/index.json"
+  for src in "$dir"/*.dtso; do
+    dtc -q -@ -I dts -O dtb -o "$dest/$(basename "$src" .dtso).dtbo" "$src"
+    chmod 0644 "$dest/$(basename "$src" .dtso).dtbo"
+  done
+done
 # mtd-utils provides flashcp, needed only to write SPI flash.
 build_deb roxora-hwtool \
   "$(shlibs "$cli/usr/bin/hwtool"), apt, util-linux, e2fsprogs, parted, rsync, udev" \
   "mtd-utils" \
   "device tree overlays, kernel branch and boot storage for Roxora boards" \
-  "hwtool enables and disables device tree overlays, switches between the kernel branches the board supports, writes the bootloader with the board's U-Boot package and moves the running system from SD to eMMC or NVMe. Every change can be shown with --dry-run first."
+  "hwtool enables and disables device tree overlays and the 40-pin header's I2C, SPI, UART, PWM and 1-Wire, switches between the kernel branches the board supports, writes and updates the bootloader with the board's U-Boot package, moves the running system from SD to eMMC, NVMe or USB, and sets boot options, CPU frequency, LED triggers and the Wi-Fi country. Every change can be shown with --dry-run first."
 
 if [[ -x "$target/release/hwtool-gtk" ]]; then
   gtk="$work/roxora-hwtool-gtk"
