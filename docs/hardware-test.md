@@ -63,6 +63,7 @@ and the board booted normally both times.
     sudo hwtool kernel switch vendor --dry-run              # record
     sudo hwtool kernel switch vendor                        # type yes, record
     hwtool kernel status                                    # record
+    ls -l /var/lib/hwtool/packages/*/                       # record
 
 Reboot. Then:
 
@@ -70,14 +71,18 @@ Reboot. Then:
     hwtool overlays list                                    # record (vendor overlays)
     sudo hwtool kernel revert                               # type yes, record
 
-Reboot. Pass: `uname -r` ends in `-vendor-rk35xx` after the switch and in
+Reboot. Pass: the dry run lists a "Save ..." step for each edge package,
+`/var/lib/hwtool/packages/<time>/` holds one `.deb` per saved package,
+`uname -r` ends in `-vendor-rk35xx` after the switch and in
 `-edge-rockchip64` after the revert, the board boots both times, Ethernet
 works both times.
 
-Known limit: on 2026-11-11 the Armbian repository published only vendor
-packages for the ArmSoM CM5-IO, so `linux-u-boot-armsom-cm5-io-edge` has no
-apt candidate and `hwtool kernel revert` stops there with a message naming
-the package. Record what it prints.
+On the ArmSoM CM5-IO the Armbian repository has no
+`linux-u-boot-armsom-cm5-io-edge` (checked 2026-11-11), so the revert installs
+the saved copy: its dry run says "apt no longer offers this version;
+installing linux-u-boot-armsom-cm5-io-edge ... from /var/lib/hwtool/packages/...".
+After the revert, `dpkg -s linux-u-boot-armsom-cm5-io-edge` shows the
+version the image shipped.
 
 ### H4. Rewrite the bootloader on the SD card
 

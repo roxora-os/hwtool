@@ -72,19 +72,45 @@ old one.
    installed (Roxora pins the Armbian repository so that only these package
    patterns come from it), and stops if one cannot;
 2. backs up `/boot/armbianEnv.txt`;
-3. runs `apt-get update` and `apt-get install` for the new packages;
-4. checks that `/boot/Image` and `/boot/dtb` point at the new branch and that
+3. saves the packages it is about to replace as `.deb` files in
+   `/var/lib/hwtool/packages/<time>/` (see below);
+4. runs `apt-get update` and `apt-get install` for the new packages;
+5. checks that `/boot/Image` and `/boot/dtb` point at the new branch and that
    the device tree U-Boot loads exists (`fdtfile=` in `armbianEnv.txt`, or
    the U-Boot build's `CONFIG_DEFAULT_FDT_FILE` when the file does not set
    one); if not, it reinstalls the old packages and stops;
-5. sets `overlay_prefix=` for the new branch;
-6. removes the old kernel, device tree and header packages (`--keep-old`
+6. sets `overlay_prefix=` for the new branch;
+7. removes the old kernel, device tree and header packages (`--keep-old`
    keeps them);
-7. records the old branch and package versions in
-   `/var/lib/hwtool/kernel-history.json`.
+8. records the old branch, package versions and saved files in
+   `/var/lib/hwtool/kernel-history.json`, and removes the packages saved by
+   earlier switches.
 
-`hwtool kernel revert` switches back to the recorded branch, asking apt for
-the recorded versions when the repository still has them.
+`hwtool kernel revert` switches back to the recorded branch. For each package
+it asks apt for the recorded version; when the repository no longer offers
+it, it installs the saved `.deb` instead. This matters where the repository
+never published a package: on 2026-11-11 apt.armbian.com had no
+`linux-u-boot-armsom-cm5-io-edge`, so the edge U-Boot of a CM5-IO image
+exists only on the board.
+
+### Saving the replaced packages
+
+The switch saves the old U-Boot package (apt removes it, because U-Boot
+packages conflict) and the old kernel, device tree and header packages
+(unless `--keep-old`). It does this without new dependencies:
+
+- If apt still has the original file in `/var/cache/apt/archives`, hwtool
+  copies it. That is the package exactly as it was installed.
+- Otherwise hwtool rebuilds the package from the dpkg database, the way
+  `dpkg-repack` does: the control fields from `/var/lib/dpkg/status` without
+  the install state, the maintainer scripts, conffiles list and md5sums from
+  `/var/lib/dpkg/info/`, and the files listed in
+  `/var/lib/dpkg/info/<package>.list`, packed with `dpkg-deb`. The files are
+  owned by root in the rebuilt package, as they are in these packages.
+  Images are built without an apt cache, so this is the usual case.
+
+`--dry-run` shows for each package whether it is copied or rebuilt and how
+much space the files take.
 
 The switch installs the new U-Boot package but does not write it to the boot
 device; `hwtool boot write-bootloader` does that.

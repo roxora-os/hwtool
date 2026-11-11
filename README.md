@@ -48,6 +48,9 @@ Every command that changes something:
   refuses unless `--yes` is given;
 - copies a boot configuration file to `/var/backups/hwtool/<time>/`
   before changing it;
+- for a kernel branch switch, saves the packages it replaces as `.deb` files
+  in `/var/lib/hwtool/packages/` so `hwtool kernel revert` works even when
+  the repository no longer offers them;
 - refuses to write to the device the system is running from, unless that is
   the point of the command (`--allow-booted-device` for a bootloader update
   on the boot device; migration never writes to it).
