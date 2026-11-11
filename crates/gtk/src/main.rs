@@ -450,13 +450,8 @@ fn kernel_page(ctx: &Shared) {
         para(
             b,
             &format!(
-                "{} {}: {}",
-                if name == current {
-                    "In use:"
-                } else {
-                    "Available:"
-                },
-                name,
+                "Branch {name}{}: {}",
+                if name == current { " (in use)" } else { "" },
                 if inst.is_empty() {
                     "not installed".to_string()
                 } else {
