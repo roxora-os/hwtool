@@ -31,6 +31,7 @@ pub mod repack;
 pub mod root;
 pub mod signals;
 pub mod storage;
+pub mod thermal;
 
 pub use root::Root;
 
