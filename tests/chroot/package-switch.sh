@@ -129,6 +129,10 @@ if in_root dpkg-query -W -f '${db:Status-Abbrev}\n' linux-image-vendor-rk35xx 2>
 fi
 grep -v '^overlays=' "$r/boot/armbianEnv.txt" | diff -u /tmp/env.orig - || fail "armbianEnv.txt differs after the round trip"
 
+step "one backup per change"
+ls -d "$r"/var/backups/roxora-hwtool/*/
+[[ "$(find "$r/var/backups/roxora-hwtool" -name armbianEnv.txt | wc -l)" -eq 3 ]] || fail "expected 3 backups"
+
 step "boot status"
 in_root hwtool boot status
 echo "PASS"

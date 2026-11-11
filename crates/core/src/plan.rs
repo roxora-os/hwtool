@@ -113,6 +113,15 @@ impl Plan {
     /// Execute every step in order. Stops at the first failure, then runs
     /// the cleanup steps.
     pub fn execute(&self, root: &Root, exec: &mut dyn Executor, stamp: &str) -> Result<()> {
+        // Never reuse a backup directory: two changes within one second
+        // would otherwise overwrite the first backup.
+        let mut stamp = stamp.to_string();
+        let mut n = 1;
+        while root.exists(&format!("{}/{stamp}", crate::BACKUP_DIR)) {
+            stamp = format!("{}-{n}", stamp.split('-').next().unwrap_or(&stamp));
+            n += 1;
+        }
+        let stamp = stamp.as_str();
         for (i, step) in self.steps.iter().enumerate() {
             eprintln!("[{}/{}] {}", i + 1, self.steps.len(), step.description);
             if let Err(e) = apply(root, exec, stamp, &step.action) {

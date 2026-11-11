@@ -79,7 +79,16 @@ fn enable_backs_up_and_writes_env() {
     assert!(st.overlays.iter().all(|o| o.enabled));
 
     let plan = overlays::disable(&f.root(), &names(&["uart1"])).unwrap();
-    plan.execute(&f.root(), &mut ex, "T2").unwrap();
+    // Same time stamp as the first change: the first backup must survive.
+    plan.execute(&f.root(), &mut ex, "T1").unwrap();
+    assert_eq!(
+        f.read("/var/backups/roxora-hwtool/T1/boot/armbianEnv.txt"),
+        ROCK4D_ENV
+    );
+    assert_eq!(
+        f.read("/var/backups/roxora-hwtool/T1-1/boot/armbianEnv.txt"),
+        format!("{ROCK4D_ENV}overlays=uart1 i2c2\n")
+    );
     assert_eq!(
         f.read("/boot/armbianEnv.txt"),
         format!("{ROCK4D_ENV}overlays=i2c2\n")
