@@ -161,7 +161,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --title "hwtool ${GITHUB_REF_NAME#v}" \
-              --notes "Debian packages for arm64: roxora-hwtool (command line) and roxora-hwtool-gtk (GTK app)."
+            # A pre-release until it has passed the hardware test (part D of
+            # roxora-os/build docs/hardware-test.md); then marked as a release
+            # by hand.
+            gh release create "$GITHUB_REF_NAME" --title "hwtool ${GITHUB_REF_NAME#v}" --prerelease \
+              --notes "Debian packages for arm64: roxora-hwtool (command line) and roxora-hwtool-gtk (GTK app). Pre-release: not yet tested on hardware."
           fi
           gh release upload "$GITHUB_REF_NAME" output/*.deb --clobber
