@@ -563,6 +563,23 @@ fn swap_show_resize_off() {
         .unwrap();
     assert!(!f.read("/etc/fstab").contains("swap"));
     assert!(f.read("/etc/fstab").contains("tmpfs /tmp"));
+    // cloud-init does not make the file again; set allows it again.
+    assert!(f.read(swap::CLOUD_CFG).contains("swap:\n  size: 0\n"));
+    let p = swap::set_plan_with_space(&f.root(), "1G", false, SPACE).unwrap();
+    assert!(
+        p.render()
+            .contains("$ rm -f /etc/cloud/cloud.cfg.d/99-zz-hwtool-swap.cfg"),
+        "{}",
+        p.render()
+    );
+    let mut ex = RecordingExecutor::default();
+    p.execute(&f.root(), &mut ex, "S2").unwrap();
+    assert!(ex
+        .ran
+        .iter()
+        .any(|r| r.join(" ") == format!("rm -f {}", swap::CLOUD_CFG)));
+    // The name sorts after Roxora's 99-roxora.cfg, so it wins.
+    assert!("99-zz-hwtool-swap.cfg" > "99-roxora.cfg");
 }
 
 #[test]

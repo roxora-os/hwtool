@@ -8,7 +8,9 @@
 //! cc_mounts runs again (a new instance id), it drops every line with
 //! comment=cloudconfig and appends its swap line for a file that is in use.
 //! So hwtool writes the line with comment=cloudconfig: cloud-init then
-//! replaces it rather than adding a second one.
+//! replaces it rather than adding a second one. `swap off` also writes
+//! [`CLOUD_CFG`] so cloud-init does not make the file again; `swap set`
+//! removes it.
 //!
 //! The BSP's armbian-zram-config.service also puts swap on zram (ENABLED=true
 //! in /etc/default/armbian-zram-config, priority 5). The swap file has the
@@ -25,6 +27,11 @@ pub const FILE: &str = "/swap.img";
 pub const FSTAB: &str = "/etc/fstab";
 pub const SYSCTL: &str = "/etc/sysctl.d/60-hwtool-swap.conf";
 pub const SWAPPINESS: &str = "/proc/sys/vm/swappiness";
+/// Tells cloud-init's mounts module not to make a swap file. cloud-init
+/// reads cloud.cfg.d in reverse lexical order and the first value of a key
+/// wins (util.read_conf_d, mergemanydict), so this file, sorted after
+/// 99-roxora.cfg, overrides its `size: auto`.
+pub const CLOUD_CFG: &str = "/etc/cloud/cloud.cfg.d/99-zz-hwtool-swap.cfg";
 const MIB: u64 = 1 << 20;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -215,6 +222,15 @@ fn fs_space(root: &Root, dir: &str) -> Result<(u64, u64)> {
     Ok((st.f_blocks as u64 * f, st.f_bavail as u64 * f))
 }
 
+fn allow_cloud_init_swap(root: &Root, p: &mut Plan) {
+    if root.exists(CLOUD_CFG) {
+        p.run(
+            format!("Let cloud-init make a swap file again ({CLOUD_CFG})"),
+            &["rm", "-f", CLOUD_CFG],
+        );
+    }
+}
+
 /// swapoff `file` if active; refuses if the memory cannot take what is on it.
 fn swapoff_step(st: &Status, file: &str, p: &mut Plan) -> Result<()> {
     if let Some(a) = st.active.iter().find(|a| a.name == file) {
@@ -284,10 +300,11 @@ pub fn set_plan_with_space(
                     content: edit_fstab(&fstab, &file, true),
                 },
             );
-        } else {
+        } else if !root.exists(CLOUD_CFG) {
             p.notices
                 .push(format!("{file} is already {} and in use.", human(bytes)));
         }
+        allow_cloud_init_swap(root, &mut p);
         return Ok(p);
     }
     let after = (avail + existing).saturating_sub(bytes);
@@ -356,6 +373,7 @@ pub fn set_plan_with_space(
             content: edit_fstab(&fstab, &file, true),
         },
     );
+    allow_cloud_init_swap(root, &mut p);
     // If making the new file fails, leave no half-made file and no fstab
     // line pointing at a missing one.
     p.on_failure(
@@ -390,7 +408,7 @@ pub fn off_plan(root: &Root) -> Result<Plan> {
     let st = status(root)?;
     let file = st.file.clone();
     let mut p = Plan::new(format!("Remove the swap file {file}"));
-    if st.file_bytes.is_none() && st.fstab_line.is_none() {
+    if st.file_bytes.is_none() && st.fstab_line.is_none() && root.exists(CLOUD_CFG) {
         p.notices.push(format!("There is no swap file {file}."));
         return Ok(p);
     }
@@ -410,6 +428,16 @@ pub fn off_plan(root: &Root) -> Result<Plan> {
         );
     }
     p.run(format!("Delete {file}"), &["rm", "-f", &file]);
+    p.step(
+        "Stop cloud-init from making a swap file again",
+        Action::WriteFile {
+            path: CLOUD_CFG.into(),
+            content:
+                "# Written by hwtool swap off: no swap file from cloud-init's mounts module.\n\
+                      # hwtool swap set removes this file.\nswap:\n  size: 0\n"
+                    .into(),
+        },
+    );
     if st.zram {
         p.notices
             .push("zram swap (armbian-zram-config) stays.".into());

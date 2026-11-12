@@ -380,6 +380,10 @@ test ! -e "$r/swap.img" || fail "/swap.img still there"
 ! grep -q swap.img "$r/etc/fstab" || fail "fstab still names /swap.img"
 ! in_root grep -q '^/swap.img ' /proc/swaps || fail "/swap.img still in use"
 ls "$r/var/backups/hwtool/"*/etc/fstab >/dev/null || fail "no fstab backup"
+grep -q 'size: 0' "$r/etc/cloud/cloud.cfg.d/99-zz-hwtool-swap.cfg" || fail "cloud-init swap not turned off"
+in_root hwtool swap set 64M --yes
+test ! -e "$r/etc/cloud/cloud.cfg.d/99-zz-hwtool-swap.cfg" || fail "swap set left the cloud-init override"
+in_root hwtool swap off --yes
 
 step "boot status"
 in_root hwtool boot status

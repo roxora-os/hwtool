@@ -61,8 +61,7 @@ pub const NO_BOOTENV: &str =
     "UEFI image: there is no boot.scr or armbianEnv.txt; kernel arguments are in \
      /etc/default/grub.d/ (run update-grub after changing them)";
 pub const NO_MIGRATE: &str =
-    "UEFI image: moving the system needs a U-Boot boot script; on a UEFI image copy it \
-     with the firmware's boot manager in mind (not supported by hwtool yet)";
+    "UEFI image: moving the system to another drive is not supported on UEFI images yet";
 pub const NO_SWITCH: &str =
     "UEFI image: only the edge kernel boots with UEFI here; the vendor branch has no UEFI support";
 

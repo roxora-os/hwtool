@@ -492,7 +492,12 @@ first). `swap set SIZE` (for example `2G` or `512M`, whole MiB):
   its fstab line.
 
 `swap off` runs `swapoff` (with the same memory check), removes the fstab
-line and deletes the file. `swap swappiness N` (0 to 200) sets
+line and deletes the file. It also writes
+`/etc/cloud/cloud.cfg.d/99-zz-hwtool-swap.cfg` with `swap: {size: 0}`, so a
+later run of cloud-init's mounts module does not make the file again:
+cloud-init reads `cloud.cfg.d` in reverse lexical order and keeps the first
+value of each key (`util.read_conf_d`, `mergemanydict`), so this file wins
+over `99-roxora.cfg`. `swap set` removes it again. `swap swappiness N` (0 to 200) sets
 `/proc/sys/vm/swappiness` now and writes
 `/etc/sysctl.d/60-hwtool-swap.conf`.
 
@@ -524,7 +529,8 @@ hwtool takes an image for UEFI when `/etc/armbian-release` names a
   otherwise it is the firmware's own. The share is printed;
 - overlays, pin header interfaces, boot options, the bootloader commands
   (write, update, version, order), the kernel branch switch and revert (only
-  edge boots with UEFI here) and migration refuse with the reason; overlays
+  edge boots with UEFI here) and migration (not supported on UEFI images
+  yet) refuse with the reason; overlays
   would have to be applied by the firmware;
 - CPU, LEDs, temperatures, Wi-Fi, swap, NPU, kernel status, headers and
   hold work as on the other images.
