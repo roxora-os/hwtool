@@ -1,5 +1,8 @@
 # Icons
 
+The hardware tool icon is by DavidQyn (https://github.com/DavidQyn) and
+Ga Hing Woo.
+
 Copied unchanged from
 [roxora-os/design](https://github.com/roxora-os/design) `icons/hwtool/` at
 commit `8433eddd00b04aa2118cee4c535eaf41f72f2d37`. Do not edit them here;

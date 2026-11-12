@@ -133,6 +133,11 @@ release.
 Writing the bootloader and moving the system need real hardware; the steps
 are in [docs/hardware-test.md](docs/hardware-test.md).
 
+## Credits
+
+The app icon is by [DavidQyn](https://github.com/DavidQyn) and Ga Hing
+Woo, from [roxora-os/design](https://github.com/roxora-os/design).
+
 ## License
 
 GPL-2.0-only. See [LICENSE](LICENSE).

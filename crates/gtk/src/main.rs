@@ -253,6 +253,9 @@ fn build_ui(app: &adw::Application) {
             .application_name("Hardware Tool")
             .application_icon(APP_ID)
             .developer_name("Roxora Project")
+            .developers(["Ga Hing Woo https://github.com/gahingwoo"])
+            // The app icon, from roxora-os/design icons/hwtool.
+            .artists(["DavidQyn https://github.com/DavidQyn", "Ga Hing Woo https://github.com/gahingwoo"])
             .version(env!("CARGO_PKG_VERSION"))
             .website("https://github.com/roxora-os/hwtool")
             .issue_url("https://github.com/roxora-os/hwtool/issues")
