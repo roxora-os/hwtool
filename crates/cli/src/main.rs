@@ -12,8 +12,8 @@ use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
 use hwtool_core::{
-    bootenv, bootinfo, cpu, interfaces, kernel, leds, migrate, npu, overlays, swap, thermal, wifi,
-    Root,
+    bootenv, bootinfo, cpu, interfaces, kernel, leds, migrate, npu, overlays, swap, thermal, uefi,
+    wifi, Root,
 };
 
 // Output never panics: when the terminal or the pipe to the GTK app is
@@ -95,6 +95,9 @@ enum Command {
     /// The swap file (/swap.img, made by cloud-init at the first boot).
     #[command(subcommand)]
     Swap(SwapCmd),
+    /// UEFI images: the firmware and where the device tree came from.
+    #[command(subcommand)]
+    Uefi(UefiCmd),
     /// Apply hwtool's saved CPU and LED settings (run at boot by hwtool-boot.service).
     #[command(hide = true)]
     Apply,
@@ -152,6 +155,12 @@ enum WifiCmd {
         #[command(flatten)]
         change: Change,
     },
+}
+
+#[derive(Subcommand)]
+enum UefiCmd {
+    /// Show the UEFI firmware and whether the device tree is the firmware's or an ESP override.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -406,12 +415,14 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             let k = kernel::status(&root);
             let b = bootloader::status(&root);
             let v = bootinfo::versions(&root).ok();
+            let u = uefi::is_uefi(&root).then(|| uefi::status(&root));
             if cli.json {
                 print_json(&serde_json::json!({
                     "kernel": k.as_ref().ok(),
                     "kernel_error": k.as_ref().err().map(|e| format!("{e:#}")),
                     "boot": b,
                     "bootloader_versions": v,
+                    "uefi": u,
                 }))?;
             } else {
                 match &k {
@@ -419,6 +430,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     Err(e) => outln!("Kernel: {e:#}"),
                 }
                 outln!();
+                if let Some(u) = &u {
+                    print_uefi(u);
+                    outln!();
+                }
                 print_boot(&b);
                 if let Some(v) = &v {
                     outln!();
@@ -772,6 +787,15 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             let p = wifi::set_plan(&root, &mut exec, c, *aic8800_follow_country)?;
             apply(cli, &root, &mut exec, p, change.clone())
         }
+        Command::Uefi(UefiCmd::Status) => {
+            let u = uefi::status(&root);
+            if cli.json {
+                print_json(&u)?;
+            } else {
+                print_uefi(&u);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Swap(SwapCmd::Show) => {
             let st = swap::status(&root)?;
             if cli.json {
@@ -1090,6 +1114,61 @@ fn print_interfaces(st: &interfaces::Status) {
         for (pin, what) in &st.busy {
             outln!("  {pin:>2}  {what}");
         }
+    }
+}
+
+fn print_uefi(u: &uefi::Status) {
+    if !u.uefi {
+        outln!("Not a UEFI image: this system boots with U-Boot and boot.scr.");
+        return;
+    }
+    outln!(
+        "UEFI image (GRUB), device tree from the {}",
+        match (u.device_tree.as_str(), &u.override_file) {
+            ("override", Some(f)) => format!("firmware's DTB override ({f})"),
+            ("firmware", _) => "firmware".to_string(),
+            _ => "firmware (hwtool cannot tell)".to_string(),
+        }
+    );
+    if !u.booted_with_uefi {
+        outln!("  /sys/firmware/efi is missing: this boot did not come from UEFI");
+    }
+    let fw: Vec<&str> = [&u.firmware_vendor, &u.firmware_version, &u.firmware_date]
+        .iter()
+        .filter_map(|x| x.as_deref())
+        .collect();
+    outln!(
+        "Firmware: {}",
+        if fw.is_empty() {
+            "unknown (no DMI/SMBIOS information)".to_string()
+        } else {
+            fw.join(", ")
+        }
+    );
+    if let Some(m) = &u.model {
+        outln!("Device tree model: {m}");
+    }
+    outln!(
+        "SoC: {} ({})",
+        u.soc.as_deref().unwrap_or("unknown"),
+        u.compatible.join(" ")
+    );
+    if let Some(s) = u.similarity {
+        outln!(
+            "Closest DTB on the EFI system partition: {:.1}% of properties equal",
+            s * 100.0
+        );
+    }
+    outln!(
+        "DTBs for the firmware's override option: {}",
+        if u.esp_dtbs.is_empty() {
+            "none".to_string()
+        } else {
+            u.esp_dtbs.len().to_string()
+        }
+    );
+    for n in &u.notes {
+        outln!("{n}");
     }
 }
 

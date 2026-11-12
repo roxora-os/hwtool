@@ -91,6 +91,7 @@ fn clash(a: &Interface, b: &Interface) -> bool {
 }
 
 pub fn status(root: &Root) -> Result<Status> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let (board, idx) = load(root)?;
     let env = BootEnv::parse(&root.read(ENV_FILE)?);
     let users = env.list("user_overlays");
@@ -147,6 +148,7 @@ fn pin_list(i: &Interface) -> String {
 }
 
 pub fn enable_plan(root: &Root, names: &[String]) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let st = status(root)?;
     let mut wanted: Vec<&Entry> = Vec::new();
     for n in names {
@@ -241,6 +243,7 @@ pub fn enable_plan(root: &Root, names: &[String]) -> Result<Plan> {
 }
 
 pub fn disable_plan(root: &Root, names: &[String]) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let st = status(root)?;
     let before = BootEnv::parse(&root.read(ENV_FILE)?);
     let mut env = before.clone();

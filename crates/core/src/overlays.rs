@@ -87,6 +87,7 @@ fn resolve_kernel(root: &Root, prefixes: &[String], name: &str) -> Option<String
 }
 
 pub fn status(root: &Root) -> Result<Status> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let env = load_env(root)?;
     let prefixes = env.list("overlay_prefix");
     let enabled = env.list("overlays");
@@ -167,6 +168,7 @@ fn env_plan(title: String, before: &BootEnv, after: &BootEnv) -> Plan {
 /// Enable overlays. A name is looked up among the kernel overlays first
 /// (added to overlays=), then in /boot/overlay-user (added to user_overlays=).
 pub fn enable(root: &Root, names: &[String]) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let before = load_env(root)?;
     let mut env = before.clone();
     let prefixes = env.list("overlay_prefix");
@@ -216,6 +218,7 @@ pub fn enable(root: &Root, names: &[String]) -> Result<Plan> {
 }
 
 pub fn disable(root: &Root, names: &[String]) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let before = load_env(root)?;
     let mut env = before.clone();
     let mut kernel_list = env.list("overlays");
@@ -295,6 +298,7 @@ fn fnv(data: &[u8]) -> String {
 /// the C preprocessor). Installs device-tree-compiler from Ubuntu first if
 /// dtc is missing.
 pub fn add_plan(root: &Root, exec: &mut dyn crate::exec::Executor, file: &str) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     let path = std::path::Path::new(file);
     let name = match (path.file_stem(), path.extension().and_then(|e| e.to_str())) {
         (Some(stem), Some("dts" | "dtso")) => stem.to_string_lossy().into_owned(),
@@ -426,6 +430,7 @@ pub fn add_plan(root: &Root, exec: &mut dyn crate::exec::Executor, file: &str) -
 
 /// Remove a user overlay: disable it and delete its file (after a backup).
 pub fn remove_plan(root: &Root, name: &str) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::OVERLAYS)?;
     validate_name(name)?;
     let dst = format!("{USER_OVERLAY_DIR}/{name}.dtbo");
     if !root.exists(&dst) {

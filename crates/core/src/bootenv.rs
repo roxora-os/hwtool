@@ -150,6 +150,7 @@ fn uses(cmd: &str, key: &str) -> bool {
 }
 
 pub fn status(root: &Root) -> Result<Status> {
+    crate::uefi::refuse(root, crate::uefi::NO_BOOTENV)?;
     let cmd = boot_cmd(root)?;
     let env = BootEnv::parse(&root.read(ENV_FILE)?);
     let defs = defaults(&cmd);
@@ -279,6 +280,7 @@ fn env_plan(title: String, before: &BootEnv, after: &BootEnv, cmd: &str) -> Plan
 }
 
 pub fn set_plan(root: &Root, assignment: &str) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_BOOTENV)?;
     let (key, value) = assignment
         .split_once('=')
         .ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE, got {assignment:?}"))?;
@@ -297,6 +299,7 @@ pub fn set_plan(root: &Root, assignment: &str) -> Result<Plan> {
 }
 
 pub fn unset_plan(root: &Root, key: &str) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_BOOTENV)?;
     let cmd = boot_cmd(root)?;
     check_key(&cmd, key)?;
     let before = BootEnv::parse(&root.read(ENV_FILE)?);

@@ -139,6 +139,7 @@ fn df_used(exec: &mut dyn Executor, path: &str) -> Result<u64> {
 }
 
 pub fn plan(root: &Root, exec: &mut dyn Executor, target: &str, write_spi: bool) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_MIGRATE)?;
     let disk = storage::find_disk(root, target)
         .with_context(|| format!("{target} is not a disk on this system"))?;
     if disk.holds_root {

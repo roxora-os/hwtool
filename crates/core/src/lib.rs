@@ -33,6 +33,7 @@ pub mod signals;
 pub mod storage;
 pub mod swap;
 pub mod thermal;
+pub mod uefi;
 pub mod wifi;
 
 pub use root::Root;

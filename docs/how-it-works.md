@@ -496,6 +496,42 @@ line and deletes the file. `swap swappiness N` (0 to 200) sets
 `/proc/sys/vm/swappiness` now and writes
 `/etc/sysctl.d/60-hwtool-swap.conf`.
 
+## UEFI images
+
+roxora-os/build also makes `generic-rk3576-uefi`, one image for RK3576
+boards with UEFI firmware such as edk2-rk3576: GPT with an EFI system
+partition at `/boot/efi`, Ubuntu's `grub-efi-arm64` (settings in
+`/etc/default/grub.d/90-roxora.cfg`, applied with `update-grub`), the edge
+kernel, and no U-Boot package, `boot.scr` or `armbianEnv.txt`. The firmware
+gives the kernel its own device tree, or, with its "DTB override" option,
+one of Armbian's rk3576 DTBs, which `/etc/kernel/postinst.d/zz-roxora-efi-dtb`
+copies to `/boot/efi/dtb/rockchip/` with every kernel.
+
+hwtool takes an image for UEFI when `/etc/armbian-release` names a
+`*-uefi` board, or when no U-Boot package is installed and the system has
+`/boot/efi/EFI` and GRUB. There:
+
+- `hwtool info` and `hwtool uefi status` show "UEFI image (GRUB)", the
+  firmware vendor, version and date from DMI (`/sys/class/dmi/id/bios_*`;
+  `/sys/firmware/efi/fw_vendor` is only an address), whether
+  `/sys/firmware/efi` exists, and the model and SoC from
+  `/proc/device-tree`;
+- the device tree source: hwtool compares every property of the running
+  tree (`/proc/device-tree`, readable without root) with each DTB on the
+  ESP, leaving out `/chosen`, memory nodes, `__symbols__` and phandles,
+  which the firmware and dtc fill in differently. If one DTB has at least
+  98% of the properties with the same value, the tree is that override;
+  otherwise it is the firmware's own. The share is printed;
+- overlays, pin header interfaces, boot options, the bootloader commands
+  (write, update, version, order), the kernel branch switch and revert (only
+  edge boots with UEFI here) and migration refuse with the reason; overlays
+  would have to be applied by the firmware;
+- CPU, LEDs, temperatures, Wi-Fi, swap, NPU, kernel status, headers and
+  hold work as on the other images.
+
+The GTK app shows the firmware and the device tree on the Board and Boot
+pages, and a status page with the reason on Overlays and Pin Header.
+
 ## The GTK app
 
 `hwtool-gtk` is a GTK 4 and libadwaita 1.5 app laid out like GNOME

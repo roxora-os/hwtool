@@ -689,6 +689,16 @@ fn error_page(e: &str) -> adw::StatusPage {
                  the board support package installs.\n\n{e}"
             ),
         )
+    } else if let Some(why) = e.strip_prefix("UEFI image: ") {
+        let mut why = why.to_string();
+        if let Some(c) = why.get(0..1) {
+            why.replace_range(0..1, &c.to_uppercase());
+        }
+        status_page(
+            "computer-symbolic",
+            "Not Used on UEFI Images",
+            &format!("This system starts from UEFI firmware and GRUB. {why}."),
+        )
     } else {
         status_page("dialog-warning-symbolic", "Not Available", &e)
     }
@@ -821,7 +831,10 @@ fn board_page(ctx: &Shared) {
     ));
     g.add(&info("Kernel for the next boot", s(&k, "kernel")));
     page.add(&g);
-    if let Ok(boot) = json(ctx, &["boot", "status"]) {
+    let u = json(ctx, &["uefi", "status"]).ok();
+    if let Some(u) = u.as_ref().filter(|u| u["uefi"].as_bool() == Some(true)) {
+        uefi_group(&page, u);
+    } else if let Ok(boot) = json(ctx, &["boot", "status"]) {
         let g = group("Bootloader", None);
         match boot["uboot"].as_object() {
             Some(u) => g.add(&info(
@@ -1521,6 +1534,15 @@ fn boot_page(ctx: &Shared) {
         page.add(&g);
     }
 
+    if let Some(u) = json(ctx, &["uefi", "status"])
+        .ok()
+        .filter(|u| u["uefi"].as_bool() == Some(true))
+    {
+        // No U-Boot, boot script or migration on a UEFI image.
+        uefi_group(&page, &u);
+        show(&holder, &page);
+        return;
+    }
     bootloader_groups(ctx, &page);
 
     let disks = st["disks"].as_array().cloned().unwrap_or_default();
@@ -2436,4 +2458,39 @@ fn zone_name(kind: &str) -> String {
         "ddr" => "Memory".into(),
         other => other.to_string(),
     }
+}
+
+/// The firmware and the device tree of a UEFI image.
+fn uefi_group(page: &adw::PreferencesPage, u: &Value) {
+    let g = group(
+        "UEFI Firmware",
+        Some("This system starts from the board's UEFI firmware and GRUB. The firmware gives the kernel its device tree; overlays, boot options, U-Boot and migration do not apply."),
+    );
+    let fw: Vec<&str> = ["firmware_vendor", "firmware_version", "firmware_date"]
+        .iter()
+        .filter_map(|k| u[*k].as_str())
+        .collect();
+    g.add(&info(
+        "Firmware",
+        &if fw.is_empty() {
+            "Unknown".to_string()
+        } else {
+            fw.join(", ")
+        },
+    ));
+    g.add(&info(
+        "Device tree",
+        &match (s(u, "device_tree"), u["override_file"].as_str()) {
+            ("override", Some(f)) => format!("DTB override from the EFI system partition ({f})"),
+            ("firmware", _) => "The firmware's own".to_string(),
+            _ => "Unknown".to_string(),
+        },
+    ));
+    if let Some(m) = u["model"].as_str() {
+        g.add(&info("Model", m));
+    }
+    if let Some(soc) = u["soc"].as_str() {
+        g.add(&info("SoC", &soc.to_uppercase()));
+    }
+    page.add(&g);
 }

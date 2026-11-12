@@ -89,6 +89,7 @@ fn compare(found: &Option<String>, want: &Option<String>) -> String {
 }
 
 pub fn versions(root: &Root) -> Result<Versions> {
+    crate::uefi::refuse(root, crate::uefi::NO_UBOOT)?;
     let u = bootloader::detect(root).context("no U-Boot package is installed")?;
     let file_version = |pred: &dyn Fn(&str) -> bool| {
         u.files
@@ -168,6 +169,7 @@ pub fn versions(root: &Root) -> Result<Versions> {
 /// Write the installed U-Boot to the device the board starts from, if it is
 /// not already the same build.
 pub fn update_plan(root: &Root) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_UBOOT)?;
     let v = versions(root)?;
     if v.media.iter().any(|m| m.state.starts_with("unreadable")) {
         bail!("hwtool cannot read the boot media; run it as root");
@@ -334,6 +336,7 @@ fn fw_config(root: &Root, l: &EnvLocation) -> String {
 }
 
 pub fn order(root: &Root, exec: &mut dyn Executor) -> Result<Order> {
+    crate::uefi::refuse(root, crate::uefi::NO_UBOOT)?;
     let default = default_env(root)
         .ok()
         .and_then(|e| e.into_iter().find(|(k, _)| k == "boot_targets"))
@@ -377,6 +380,7 @@ pub fn order(root: &Root, exec: &mut dyn Executor) -> Result<Order> {
 /// environment with only boot_targets changed, written with fw_setenv
 /// (libubootenv-tool) to the SPI flash location the U-Boot build uses.
 pub fn order_plan(root: &Root, exec: &mut dyn Executor, targets: &[String]) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_UBOOT)?;
     let l = env_location(root)?;
     let env = default_env(root)?;
     let default: Vec<String> = env
@@ -464,6 +468,7 @@ pub fn order_plan(root: &Root, exec: &mut dyn Executor, targets: &[String]) -> R
 
 /// Erase the saved environment so U-Boot uses its built-in one.
 pub fn order_reset_plan(root: &Root) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_UBOOT)?;
     let l = env_location(root)?;
     if !root.has_program("flash_erase") {
         bail!("flash_erase is not installed; install the mtd-utils package");

@@ -196,6 +196,7 @@ pub fn switch_plan(
     keep_old: bool,
     back: Option<&HistoryEntry>,
 ) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_SWITCH)?;
     let st = status(root)?;
     let board = &st.board;
     if !board.supports(target) {
@@ -594,6 +595,7 @@ fn apt_simulate(exec: &mut dyn Executor, args: &[String]) -> Result<AptSim> {
 
 /// Plan the way back to the branch before the last switch.
 pub fn revert_plan(root: &Root, exec: &mut dyn Executor, keep_old: bool) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_SWITCH)?;
     let history = read_history(root);
     let last = history.last().context(
         "hwtool has not switched the kernel branch on this system; there is nothing to revert",

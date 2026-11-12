@@ -27,7 +27,11 @@ hwtool changes the hardware settings of a board running a
 10. **Wi-Fi country**: the regulatory country, set now and at every boot.
 11. **Swap**: the swap file cloud-init makes at the first boot: show,
     resize, remove, and `vm.swappiness`.
-12. **NPU**: show whether the NPU can run
+12. **UEFI images**: on the `generic-rk3576-uefi` image, `hwtool uefi status`
+    shows the firmware and whether the device tree is the firmware's or an
+    override from the EFI system partition; what needs U-Boot or `boot.scr`
+    is refused with the reason.
+13. **NPU**: show whether the NPU can run
    [charsiu](https://github.com/gahingwoo/charsiu) (the `rocket` driver, the
    NPU device tree nodes, `/dev/accel`), and install or remove charsiu
    (RK3576 only).
@@ -83,6 +87,7 @@ sudo hwtool wifi country DE
 hwtool swap show
 sudo hwtool swap set 2G                      # or: swap off
 sudo hwtool swap swappiness 20
+hwtool uefi status                           # UEFI image: firmware, device tree source
 hwtool npu status
 sudo hwtool npu install-charsiu                # then: charsiu pull
 sudo hwtool npu remove-charsiu

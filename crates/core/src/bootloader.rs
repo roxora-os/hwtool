@@ -485,6 +485,7 @@ pub struct WritePlan {
 }
 
 pub fn write_plan(root: &Root, target: &Target, allow_booted: bool) -> Result<Plan> {
+    crate::uefi::refuse(root, crate::uefi::NO_UBOOT)?;
     Ok(write_plan_with(root, target, allow_booted, None)?.plan)
 }
 
