@@ -2,7 +2,7 @@
 
 Copied unchanged from
 [roxora-os/design](https://github.com/roxora-os/design) `icons/hwtool/` at
-commit `ca04578095f0fbc099d47396ffb64984f29e0ad9`. Do not edit them here;
+commit `8ea4c3ec558cd1cdca21ba889e151498d4ef8c9e`. Do not edit them here;
 change them in the design repository and copy them again.
 
 The Debian package installs them under the app ID
