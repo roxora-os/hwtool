@@ -68,7 +68,7 @@ const PAGES: &[(&str, &str, &str)] = &[
     ("kernel", "Kernel", "emblem-system-symbolic"),
     ("boot", "Boot", "drive-harddisk-symbolic"),
     ("cpu", "CPU", "power-profile-performance-symbolic"),
-    ("memory", "Memory", "drive-harddisk-system-symbolic"),
+    ("memory", "Memory", "media-flash-symbolic"),
     ("devices", "Devices", "preferences-other-symbolic"),
     ("npu", "NPU", "applications-science-symbolic"),
 ];
