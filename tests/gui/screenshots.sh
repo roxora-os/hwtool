@@ -17,6 +17,17 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$out"
 "$here/demo-root.sh" "$work/demo"
+# The UEFI image: the same board without U-Boot and boot.scr, GRUB on the ESP.
+cp -a "$work/demo" "$work/uefi"
+rm -rf "$work/uefi/usr/lib/u-boot" "$work/uefi/boot/armbianEnv.txt" "$work/uefi/boot/boot.cmd" "$work/uefi/boot/boot.scr"
+sed -i 's/^BOARD=.*/BOARD=generic-rk3576-uefi/; s/^KERNEL_TARGET=.*/KERNEL_TARGET=edge/' "$work/uefi/etc/armbian-release"
+mkdir -p "$work/uefi/boot/efi/EFI/ubuntu" "$work/uefi/boot/grub" "$work/uefi/sys/firmware/efi" "$work/uefi/sys/class/dmi/id"
+: >"$work/uefi/boot/grub/grub.cfg"
+echo 64 >"$work/uefi/sys/firmware/efi/fw_platform_size"
+echo "EFI Development Kit II" >"$work/uefi/sys/class/dmi/id/bios_vendor"
+echo "v0.3" >"$work/uefi/sys/class/dmi/id/bios_version"
+printf 'Radxa ROCK 4D\0' >"$work/uefi/proc/device-tree/model"
+printf 'radxa,rock-4d\0rockchip,rk3576\0' >"$work/uefi/proc/device-tree/compatible"
 mkdir -p "$work/unknown" "$work/config/gtk-4.0"
 # A fixed 96 dpi, no animations (a dialog is captured fully shown) and no
 # user settings, so every display server renders alike.
@@ -48,4 +59,7 @@ for theme in light dark; do
   shot "confirm-$theme" "$work/demo" HWTOOL_GTK_PAGE=boot HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_CONFIRM=1
   shot "confirm-narrow-$theme" "$work/demo" HWTOOL_GTK_PAGE=boot HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_CONFIRM=1 HWTOOL_GTK_SIZE=360x700
   shot "unknown-board-$theme" "$work/unknown" HWTOOL_GTK_PAGE=board HWTOOL_GTK_DARK=$dark
+  for page in board boot overlays interfaces; do
+    shot "uefi-$page-$theme" "$work/uefi" HWTOOL_GTK_PAGE=$page HWTOOL_GTK_DARK=$dark
+  done
 done
