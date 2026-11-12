@@ -133,7 +133,7 @@ groups, `dtc -@`, `fdtoverlay`), builds and installs both packages, starts
 the GTK app under Xvfb and saves screenshots, and runs a kernel branch
 switch with apt and dpkg and a swap file with `mkswap` and `swapon` in an
 Ubuntu 24.04 chroot (`tests/chroot/package-switch.sh`). Tags `v*` attach the packages to the
-release.
+release, with the notes from that version's section of [CHANGELOG.md](CHANGELOG.md).
 
 Writing the bootloader and moving the system need real hardware; the steps
 are in [docs/hardware-test.md](docs/hardware-test.md).

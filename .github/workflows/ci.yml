@@ -39,6 +39,12 @@ jobs:
       - name: Unit and fake-root tests
         run: cargo test --workspace
 
+      - name: The changelog has notes for this version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          sh packaging/release-notes.sh "$version" >/dev/null
+          grep -q "<release version=\"$version\"" data/io.github.roxora_os.HwTool.metainfo.xml
+
       - name: Header interface overlays against the boards' DTBs
         run: python3 tests/interfaces/check.py
 
@@ -164,7 +170,10 @@ jobs:
             # A pre-release until it has passed the hardware test (part D of
             # roxora-os/build docs/hardware-test.md); then marked as a release
             # by hand.
+            # The notes are the tag's section of CHANGELOG.md; the script
+            # fails when there is none, so no release goes out without notes.
+            sh packaging/release-notes.sh "${GITHUB_REF_NAME#v}" >release-notes.md
             gh release create "$GITHUB_REF_NAME" --title "hwtool ${GITHUB_REF_NAME#v}" --prerelease \
-              --notes "Debian packages for arm64: roxora-hwtool (command line) and roxora-hwtool-gtk (GTK app). Pre-release: not yet tested on hardware."
+              --notes-file release-notes.md
           fi
           gh release upload "$GITHUB_REF_NAME" output/*.deb --clobber
