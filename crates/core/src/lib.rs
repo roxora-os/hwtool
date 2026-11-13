@@ -19,6 +19,7 @@ pub mod cpu;
 pub mod dpkg;
 pub mod env;
 pub mod exec;
+pub mod fan;
 pub mod interfaces;
 pub mod kernel;
 pub mod leds;

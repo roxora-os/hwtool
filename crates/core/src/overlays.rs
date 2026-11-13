@@ -293,6 +293,52 @@ fn fnv(data: &[u8]) -> String {
     format!("{h:016x}")
 }
 
+/// Add the steps that install the device tree compiler, if dtc is missing.
+pub fn ensure_dtc(root: &Root, exec: &mut dyn crate::exec::Executor, p: &mut Plan) -> Result<()> {
+    if !root.has_program("dtc") {
+        let sim = vec![
+            "apt-get".to_string(),
+            "-s".into(),
+            "-y".into(),
+            "--no-install-recommends".into(),
+            "install".into(),
+            "device-tree-compiler".into(),
+        ];
+        let out = exec
+            .capture(&sim)
+            .context("apt cannot resolve device-tree-compiler")?;
+        let removals: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("Remv ") || l.starts_with("Purg "))
+            .collect();
+        if !removals.is_empty() {
+            bail!(
+                "installing device-tree-compiler would also remove: {}",
+                removals.join("; ")
+            );
+        }
+        p.run(
+            "Install the device tree compiler",
+            &[
+                "apt-get",
+                "install",
+                "-y",
+                "--no-install-recommends",
+                "device-tree-compiler",
+            ],
+        );
+        let at = p.steps.len() - 1;
+        p.steps[at].details = std::iter::once("apt resolves:".to_string())
+            .chain(
+                out.lines()
+                    .filter(|l| l.starts_with("Inst "))
+                    .map(|l| format!("  {l}")),
+            )
+            .collect();
+    }
+    Ok(())
+}
+
 /// Compile a .dts or .dtso overlay, install it in /boot/overlay-user and
 /// enable it through user_overlays= (what armbian-add-overlay does, without
 /// the C preprocessor). Installs device-tree-compiler from Ubuntu first if
@@ -346,46 +392,7 @@ pub fn add_plan(root: &Root, exec: &mut dyn crate::exec::Executor, file: &str) -
     env.set_list("user_overlays", &users);
 
     let mut p = Plan::new(format!("Add the user overlay {name} from {file}"));
-    if !root.has_program("dtc") {
-        let sim = vec![
-            "apt-get".to_string(),
-            "-s".into(),
-            "-y".into(),
-            "--no-install-recommends".into(),
-            "install".into(),
-            "device-tree-compiler".into(),
-        ];
-        let out = exec
-            .capture(&sim)
-            .context("apt cannot resolve device-tree-compiler")?;
-        let removals: Vec<&str> = out
-            .lines()
-            .filter(|l| l.starts_with("Remv ") || l.starts_with("Purg "))
-            .collect();
-        if !removals.is_empty() {
-            bail!(
-                "installing device-tree-compiler would also remove: {}",
-                removals.join("; ")
-            );
-        }
-        p.run(
-            "Install the device tree compiler",
-            &[
-                "apt-get",
-                "install",
-                "-y",
-                "--no-install-recommends",
-                "device-tree-compiler",
-            ],
-        );
-        p.steps[0].details = std::iter::once("apt resolves:".to_string())
-            .chain(
-                out.lines()
-                    .filter(|l| l.starts_with("Inst "))
-                    .map(|l| format!("  {l}")),
-            )
-            .collect();
-    }
+    ensure_dtc(root, exec, &mut p)?;
     let tmp = format!("/run/hwtool/{name}.dtbo");
     p.run("Make the work directory", &["mkdir", "-p", "/run/hwtool"]);
     p.run(

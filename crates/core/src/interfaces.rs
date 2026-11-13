@@ -102,6 +102,7 @@ pub fn status(root: &Root) -> Result<Status> {
                 overlay_name(&i.name)
             ))
     };
+    let fan = crate::fan::configured(root);
     let interfaces = idx
         .interfaces
         .iter()
@@ -112,12 +113,21 @@ pub fn status(root: &Root) -> Result<Status> {
                 .filter(|o| clash(i, o))
                 .map(|o| o.name.clone())
                 .collect();
-            let blocked_by = idx
+            let mut blocked_by: Vec<String> = idx
                 .interfaces
                 .iter()
                 .filter(|o| clash(i, o) && on(o))
                 .map(|o| o.name.clone())
                 .collect();
+            // A fan from 'hwtool fan enable' holds its PWM channel and pins.
+            if let Some(f) = &fan {
+                if i.name == f.pwm
+                    || i.node == f.node
+                    || i.pins.iter().any(|p| f.pins.contains(&p.pin))
+                {
+                    blocked_by.push("the fan".into());
+                }
+            }
             Entry {
                 enabled: on(i),
                 interface: i.clone(),
@@ -131,7 +141,13 @@ pub fn status(root: &Root) -> Result<Status> {
         .iter()
         .filter_map(|(k, v)| k.parse().ok().map(|p| (p, v.clone())))
         .collect();
+    if let Some(f) = &fan {
+        for pin in &f.pins {
+            busy.push((*pin, "the fan (hwtool fan)".into()));
+        }
+    }
     busy.sort();
+    busy.dedup_by_key(|b| b.0);
     Ok(Status {
         board: board.board,
         interfaces,

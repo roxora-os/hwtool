@@ -12,8 +12,8 @@ use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
 use hwtool_core::{
-    bootenv, bootinfo, cpu, interfaces, kernel, leds, migrate, npu, overlays, swap, thermal, uefi,
-    wifi, Root,
+    bootenv, bootinfo, cpu, fan, interfaces, kernel, leds, migrate, npu, overlays, swap, thermal,
+    uefi, wifi, Root,
 };
 
 // Output never panics: when the terminal or the pipe to the GTK app is
@@ -138,8 +138,36 @@ enum LedsCmd {
 
 #[derive(Subcommand)]
 enum FanCmd {
-    /// Show thermal zones, trip points, cooling devices and whether there is a fan.
+    /// Show thermal zones, trip points, cooling devices and the fan.
     Show,
+    /// Let the kernel drive a PWM fan from the SoC temperature (after a reboot).
+    Enable {
+        /// `fan` for the board's fan connector (the default), or a header
+        /// PWM function from `hwtool interfaces list`.
+        #[arg(long)]
+        pwm: Option<String>,
+        /// TEMPERATURE:PERCENT points, temperatures going up.
+        #[arg(long, default_value = fan::DEFAULT_CURVE)]
+        curve: String,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Remove the fan set up by `fan enable` (after a reboot).
+    Disable {
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Run the fan at a fixed speed (0 to 100 %) until reboot or `fan auto`.
+    Set {
+        percent: String,
+        #[command(flatten)]
+        change: Change,
+    },
+    /// Give the fan back to the thermal governor.
+    Auto {
+        #[command(flatten)]
+        change: Change,
+    },
 }
 
 #[derive(Subcommand)]
@@ -735,6 +763,26 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Fan(FanCmd::Enable { pwm, curve, change }) => {
+            let p = fan::enable_plan(&root, &mut exec, pwm.as_deref(), curve)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Fan(FanCmd::Disable { change }) => {
+            let p = fan::disable_plan(&root)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Fan(FanCmd::Set { percent, change }) => {
+            let n: u32 = percent
+                .trim_end_matches('%')
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{percent}: give a percentage, 0 to 100"))?;
+            let p = fan::set_plan(&root, n)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
+        Command::Fan(FanCmd::Auto { change }) => {
+            let p = fan::auto_plan(&root)?;
+            apply(cli, &root, &mut exec, p, change.clone())
+        }
         Command::Wifi(WifiCmd::Country {
             country: None,
             aic8800_follow_country,
@@ -1249,7 +1297,27 @@ fn print_thermal(st: &thermal::Status) {
             c.max_state
         );
     }
-    outln!("Fan: {}", if st.fan { "yes" } else { "none" });
+    outln!(
+        "Fan: {}{}",
+        if st.fan { "yes" } else { "none" },
+        st.fan_pwm
+            .map(|p| format!(", speed {}% (pwm1 {p} of 255)", (p * 100 + 127) / 255))
+            .unwrap_or_default()
+    );
+    if let Some(c) = &st.configured {
+        outln!(
+            "Set up by hwtool fan enable: {} ({})",
+            c.pwm,
+            c.curve
+                .iter()
+                .map(|(t, d)| format!("{d}% at {t} C"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if let Some(p) = &st.policy {
+        outln!("Governor of {}: {p}", fan::ZONE);
+    }
     for n in &st.notes {
         outln!("{n}");
     }

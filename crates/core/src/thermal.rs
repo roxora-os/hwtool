@@ -5,6 +5,7 @@
 //! cooling maps throttle the CPU and GPU. Trip temperatures can change at
 //! run time only with CONFIG_THERMAL_WRITABLE_TRIPS, which the edge kernel
 //! does not set, so `fan show` reports them and says why they are fixed.
+//! `hwtool fan enable` (fan.rs) adds a pwm-fan node with its own trips.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -44,6 +45,15 @@ pub struct Status {
     /// A fan: a pwm-fan cooling device or node in the device tree.
     pub fan: bool,
     pub writable_trips: bool,
+    /// The pwm-fan driver's speed (pwm1, 0 to 255), if it is bound.
+    pub fan_pwm: Option<u32>,
+    /// The governor of package-thermal (user_space after `fan set`).
+    pub policy: Option<String>,
+    /// What `hwtool fan enable` set up.
+    pub configured: Option<crate::fan::Conf>,
+    /// PWM outputs `fan enable` can use: (name, description). Empty on
+    /// UEFI images, where the firmware owns the device tree.
+    pub sources: Vec<(String, String)>,
     pub notes: Vec<String>,
 }
 
@@ -119,11 +129,27 @@ pub fn status(root: &Root) -> Result<Status> {
     let fan = cooling.iter().any(|c| c.kind.contains("fan")) || dt_has_fan(root);
     let writable_trips = zones.iter().any(|z| z.trips.iter().any(|t| t.writable));
     let mut notes = Vec::new();
-    if !fan {
+    let fan_pwm = crate::fan::hwmon(root)
+        .and_then(|h| read(root, &format!("{h}/pwm1")))
+        .and_then(|v| v.parse().ok());
+    let policy = zones
+        .iter()
+        .find(|z| z.kind == crate::fan::ZONE)
+        .and_then(|z| read(root, &format!("{THERMAL}/{}/policy", z.name)));
+    let configured = crate::fan::configured(root);
+    if configured.is_some() && !fan {
         notes.push(
-            "No fan: the device tree has no pwm-fan node, so cooling is by lowering the CPU and GPU clocks."
+            "A fan is set up with 'hwtool fan enable'; it works after the next reboot.".into(),
+        );
+    } else if !fan {
+        notes.push(
+            "No fan: the device tree has no pwm-fan node, so cooling is by lowering the CPU and GPU clocks. \
+             'hwtool fan enable' adds one."
                 .into(),
         );
+    }
+    if policy.as_deref() == Some("user_space") {
+        notes.push("The fan runs at a fixed speed from 'hwtool fan set'; 'hwtool fan auto' gives it back to the governor.".into());
     }
     if !writable_trips && !zones.is_empty() {
         notes.push(
@@ -137,6 +163,14 @@ pub fn status(root: &Root) -> Result<Status> {
         cooling,
         fan,
         writable_trips,
+        fan_pwm,
+        policy,
+        configured,
+        sources: if crate::uefi::is_uefi(root) {
+            Vec::new()
+        } else {
+            crate::fan::sources(root).unwrap_or_default()
+        },
         notes,
     })
 }

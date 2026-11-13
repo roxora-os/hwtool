@@ -5,7 +5,7 @@ mod common;
 use common::*;
 use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::RecordingExecutor;
-use hwtool_core::{bootenv, bootinfo, interfaces, kernel, migrate, overlays, uefi};
+use hwtool_core::{bootenv, bootinfo, fan, interfaces, kernel, migrate, overlays, uefi};
 
 fn dtb(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -118,6 +118,10 @@ fn u_boot_and_boot_script_commands_refuse() {
         let e = e.expect("refused").to_string();
         assert!(e.contains("overlays are applied by the firmware"), "{e}");
     }
+    let e = fan::enable_plan(&r, &mut ex, None, fan::DEFAULT_CURVE)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("overlays are applied by the firmware"), "{e}");
     let e = bootenv::status(&r).unwrap_err().to_string();
     assert!(e.contains("no boot.scr or armbianEnv.txt"), "{e}");
     for e in [
