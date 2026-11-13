@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+A pre-release: not yet tested on hardware.
 
 - PWM fan control: `hwtool fan enable` adds a fan on the board's fan
   connector (ROCK 4D, CM5-IO) or a header PWM pin, driven by the kernel from

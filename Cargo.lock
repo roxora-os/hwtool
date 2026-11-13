@@ -678,7 +678,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "roxora-hwtool"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "roxora-hwtool-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "roxora-hwtool-gtk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gtk4",
  "libadwaita",
