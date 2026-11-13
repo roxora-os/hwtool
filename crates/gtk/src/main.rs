@@ -2166,6 +2166,45 @@ fn devices_page(ctx: &Shared) {
         }
     }
 
+    if let Ok(st) = json(ctx, &["fan", "show"]) {
+        let g = group("Temperatures", None);
+        for z in st["zones"].as_array().cloned().unwrap_or_default() {
+            let trips: Vec<String> = z["trips"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|t| {
+                    format!(
+                        "{} at {:.0} °C",
+                        s(t, "kind"),
+                        t["temp_mc"].as_i64().unwrap_or(0) as f64 / 1000.0
+                    )
+                })
+                .collect();
+            let r = row(
+                &zone_name(s(&z, "kind")),
+                &if trips.is_empty() {
+                    String::new()
+                } else {
+                    format!("Trips: {}", trips.join(", "))
+                },
+            );
+            r.set_subtitle_lines(0);
+            r.add_suffix(&gtk::Label::new(Some(
+                &z["temp_mc"]
+                    .as_i64()
+                    .map(|t| format!("{:.1} °C", t as f64 / 1000.0))
+                    .unwrap_or_else(|| "unknown".into()),
+            )));
+            g.add(&r);
+        }
+        if let Some(n) = strings(&st["notes"]).iter().find(|n| n.starts_with("Trip")) {
+            g.add(&note_row(n));
+        }
+        page.add(&g);
+        fan_groups(ctx, &page, &st);
+    }
     if let Ok(st) = json(ctx, &["wifi", "country"]) {
         let g = group(
             "Wi-Fi Country",
@@ -2210,42 +2249,6 @@ fn devices_page(ctx: &Shared) {
         page.add(&g);
     }
 
-    if let Ok(st) = json(ctx, &["fan", "show"]) {
-        let g = group("Temperatures", None);
-        for z in st["zones"].as_array().cloned().unwrap_or_default() {
-            let trips: Vec<String> = z["trips"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .map(|t| {
-                    format!(
-                        "{} at {:.0} °C",
-                        s(t, "kind"),
-                        t["temp_mc"].as_i64().unwrap_or(0) as f64 / 1000.0
-                    )
-                })
-                .collect();
-            let r = row(
-                &zone_name(s(&z, "kind")),
-                &if trips.is_empty() {
-                    String::new()
-                } else {
-                    format!("Trips: {}", trips.join(", "))
-                },
-            );
-            r.set_subtitle_lines(0);
-            r.add_suffix(&gtk::Label::new(Some(
-                &z["temp_mc"]
-                    .as_i64()
-                    .map(|t| format!("{:.1} °C", t as f64 / 1000.0))
-                    .unwrap_or_else(|| "unknown".into()),
-            )));
-            g.add(&r);
-        }
-        page.add(&g);
-        fan_groups(ctx, &page, &st);
-    }
     show(&holder, &page);
 }
 
@@ -2495,8 +2498,11 @@ fn fan_groups(ctx: &Shared, page: &adw::PreferencesPage, st: &Value) {
             None => "No fan driver running".into(),
         },
     ));
-    for n in strings(&st["notes"]) {
-        g.add(&note_row(&n));
+    for n in strings(&st["notes"])
+        .iter()
+        .filter(|n| !n.starts_with("Trip"))
+    {
+        g.add(&note_row(n));
     }
     page.add(&g);
 
@@ -2517,9 +2523,9 @@ fn fan_groups(ctx: &Shared, page: &adw::PreferencesPage, st: &Value) {
             .iter()
             .map(|(n, d)| {
                 if n == "fan" {
-                    format!("Fan connector: {d}")
+                    "Fan connector".to_string()
                 } else {
-                    d.clone()
+                    d.replace(" on header pin ", ", pin ")
                 }
             })
             .collect();
@@ -2556,7 +2562,7 @@ fn fan_groups(ctx: &Shared, page: &adw::PreferencesPage, st: &Value) {
         let add_point = {
             let (g, points) = (g.clone(), points.clone());
             move |t: u32, d: u32| {
-                let r = adw::ActionRow::builder().title("From").build();
+                let r = adw::ActionRow::new();
                 let temp = gtk::SpinButton::with_range(30.0, 100.0, 1.0);
                 temp.set_value(t as f64);
                 temp.set_valign(gtk::Align::Center);
@@ -2564,7 +2570,7 @@ fn fan_groups(ctx: &Shared, page: &adw::PreferencesPage, st: &Value) {
                 duty.set_value(d as f64);
                 duty.set_valign(gtk::Align::Center);
                 r.add_suffix(&temp);
-                r.add_suffix(&gtk::Label::new(Some("°C, speed")));
+                r.add_suffix(&gtk::Label::new(Some("°C")));
                 r.add_suffix(&duty);
                 r.add_suffix(&gtk::Label::new(Some("%")));
                 let del = gtk::Button::from_icon_name("list-remove-symbolic");
