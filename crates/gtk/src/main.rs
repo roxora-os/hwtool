@@ -2244,19 +2244,7 @@ fn devices_page(ctx: &Shared) {
             g.add(&r);
         }
         page.add(&g);
-        let g = group("Cooling", None);
-        g.add(&info(
-            "Fan",
-            if st["fan"].as_bool() == Some(true) {
-                "Yes"
-            } else {
-                "None"
-            },
-        ));
-        for n in strings(&st["notes"]) {
-            g.add(&note_row(&n));
-        }
-        page.add(&g);
+        fan_groups(ctx, &page, &st);
     }
     show(&holder, &page);
 }
@@ -2493,4 +2481,216 @@ fn uefi_group(page: &adw::PreferencesPage, u: &Value) {
         g.add(&info("SoC", &soc.to_uppercase()));
     }
     page.add(&g);
+}
+
+/// The fan: speed now, kernel control with a curve, and a fixed test speed.
+fn fan_groups(ctx: &Shared, page: &adw::PreferencesPage, st: &Value) {
+    let g = group("Fan", None);
+    let running = st["fan"].as_bool() == Some(true);
+    g.add(&info(
+        "Speed now",
+        &match st["fan_pwm"].as_u64() {
+            Some(p) => format!("{}%", (p * 100 + 127) / 255),
+            None if running => "Unknown".into(),
+            None => "No fan driver running".into(),
+        },
+    ));
+    for n in strings(&st["notes"]) {
+        g.add(&note_row(&n));
+    }
+    page.add(&g);
+
+    let sources: Vec<(String, String)> = st["sources"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| Some((v[0].as_str()?.to_string(), v[1].as_str()?.to_string())))
+        .collect();
+    if !sources.is_empty() {
+        let conf = &st["configured"];
+        let g = group(
+            "Fan Control",
+            Some("The kernel turns the fan up in steps as the SoC gets warmer, and down again 5 °C below each step. Changes take effect after a reboot."),
+        );
+        let labels: Vec<String> = sources
+            .iter()
+            .map(|(n, d)| {
+                if n == "fan" {
+                    format!("Fan connector: {d}")
+                } else {
+                    d.clone()
+                }
+            })
+            .collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let combo = adw::ComboRow::builder()
+            .title("Fan on")
+            .model(&gtk::StringList::new(&refs))
+            .selected(
+                conf["pwm"]
+                    .as_str()
+                    .and_then(|p| sources.iter().position(|(n, _)| n == p))
+                    .unwrap_or(0) as u32,
+            )
+            .build();
+        g.add(&combo);
+        let curve: Vec<(u32, u32)> = conf["curve"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| Some((p[0].as_u64()? as u32, p[1].as_u64()? as u32)))
+                    .collect()
+            })
+            .filter(|c: &Vec<(u32, u32)>| !c.is_empty())
+            .unwrap_or_else(|| vec![(50, 30), (60, 50), (70, 80), (80, 100)]);
+        type Point = (adw::ActionRow, gtk::SpinButton, gtk::SpinButton);
+        let points: Rc<RefCell<Vec<Point>>> = Rc::new(RefCell::new(Vec::new()));
+        let anchor = adw::ActionRow::builder().title("Add a step").build();
+        let add = gtk::Button::from_icon_name("list-add-symbolic");
+        add.set_valign(gtk::Align::Center);
+        add.add_css_class("flat");
+        add.set_tooltip_text(Some("Add a step"));
+        anchor.add_suffix(&add);
+        anchor.set_activatable_widget(Some(&add));
+        let add_point = {
+            let (g, points) = (g.clone(), points.clone());
+            move |t: u32, d: u32| {
+                let r = adw::ActionRow::builder().title("From").build();
+                let temp = gtk::SpinButton::with_range(30.0, 100.0, 1.0);
+                temp.set_value(t as f64);
+                temp.set_valign(gtk::Align::Center);
+                let duty = gtk::SpinButton::with_range(0.0, 100.0, 5.0);
+                duty.set_value(d as f64);
+                duty.set_valign(gtk::Align::Center);
+                r.add_suffix(&temp);
+                r.add_suffix(&gtk::Label::new(Some("°C, speed")));
+                r.add_suffix(&duty);
+                r.add_suffix(&gtk::Label::new(Some("%")));
+                let del = gtk::Button::from_icon_name("list-remove-symbolic");
+                del.set_valign(gtk::Align::Center);
+                del.add_css_class("flat");
+                del.set_tooltip_text(Some("Remove this step"));
+                r.add_suffix(&del);
+                g.add(&r);
+                points.borrow_mut().push((r.clone(), temp, duty));
+                let (g2, points2) = (g.clone(), points.clone());
+                del.connect_clicked(move |_| {
+                    let mut v = points2.borrow_mut();
+                    if v.len() > 1 {
+                        if let Some(i) = v.iter().position(|(x, _, _)| *x == r) {
+                            g2.remove(&v.remove(i).0);
+                        }
+                    }
+                });
+            }
+        };
+        for (t, d) in &curve {
+            add_point(*t, *d);
+        }
+        g.add(&anchor);
+        {
+            let (g, points, anchor) = (g.clone(), points.clone(), anchor.clone());
+            add.connect_clicked(move |_| {
+                let n = points.borrow().len();
+                if n >= 8 {
+                    return;
+                }
+                let (t, d) = points
+                    .borrow()
+                    .last()
+                    .map(|(_, t, d)| (t.value() as u32 + 10, d.value() as u32))
+                    .unwrap_or((50, 30));
+                g.remove(&anchor);
+                add_point(t.min(100), d.min(100));
+                g.add(&anchor);
+            });
+        }
+        let (r, b) = action_row(
+            if conf.is_object() {
+                "Apply the fan settings"
+            } else {
+                "Turn on fan control"
+            },
+            "Writes a device tree overlay; reboot afterwards",
+            "Apply",
+            "suggested-action",
+        );
+        g.add(&r);
+        let ctx2 = ctx.clone();
+        let points2 = points.clone();
+        b.connect_clicked(move |_| {
+            let Some((name, _)) = sources.get(combo.selected() as usize) else {
+                return;
+            };
+            let curve: Vec<String> = points2
+                .borrow()
+                .iter()
+                .map(|(_, t, d)| format!("{}:{}", t.value() as u32, d.value() as u32))
+                .collect();
+            let c = Cmd::new(&["fan", "enable", "--pwm", name, "--curve", &curve.join(",")]);
+            propose(&ctx2, "Turn On Fan Control?", vec![c], false);
+        });
+        if conf.is_object() {
+            let (r, b) = action_row(
+                "Turn off fan control",
+                "Removes the overlay; reboot afterwards",
+                "Turn Off",
+                "destructive-action",
+            );
+            g.add(&r);
+            let ctx2 = ctx.clone();
+            b.connect_clicked(move |_| {
+                propose(
+                    &ctx2,
+                    "Turn Off Fan Control?",
+                    vec![Cmd::new(&["fan", "disable"])],
+                    true,
+                );
+            });
+        }
+        page.add(&g);
+    }
+
+    if st["fan_pwm"].is_u64() {
+        let g = group(
+            "Test the Fan",
+            Some("A fixed speed until the next boot. The temperature no longer changes it until you choose Automatic."),
+        );
+        let spin = adw::SpinRow::with_range(0.0, 100.0, 10.0);
+        spin.set_title("Speed (%)");
+        spin.set_value(100.0);
+        g.add(&spin);
+        let (r, b) = action_row("Run at this speed", "", "Set", "");
+        g.add(&r);
+        let ctx2 = ctx.clone();
+        b.connect_clicked(move |_| {
+            let v = format!("{}", spin.value() as u32);
+            propose(
+                &ctx2,
+                "Run the Fan at a Fixed Speed?",
+                vec![Cmd::new(&["fan", "set", &v])],
+                false,
+            );
+        });
+        if st["policy"].as_str() == Some("user_space") {
+            let (r, b) = action_row(
+                "Automatic",
+                "Let the temperature drive the fan again",
+                "Automatic",
+                "",
+            );
+            g.add(&r);
+            let ctx2 = ctx.clone();
+            b.connect_clicked(move |_| {
+                propose(
+                    &ctx2,
+                    "Let the Temperature Drive the Fan?",
+                    vec![Cmd::new(&["fan", "auto"])],
+                    false,
+                );
+            });
+        }
+        page.add(&g);
+    }
 }

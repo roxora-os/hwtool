@@ -27,7 +27,7 @@ console=both
 overlay_prefix=rockchip-rk3576
 rootdev=UUID=db9a14c3-db24-44e3-b7cc-062ae4e6a908
 rootfstype=ext4
-user_overlays=sample-sensor hwtool-i2c8-m2
+user_overlays=sample-sensor hwtool-i2c8-m2 hwtool-fan
 END
 : >"$r/boot/overlay-user/sample-sensor.dtbo"
 : >"$r/boot/overlay-user/sample-display.dtbo"
@@ -181,3 +181,16 @@ printf 'UUID=db9a14c3-db24-44e3-b7cc-062ae4e6a908 / ext4 defaults,commit=120,err
 mkdir -p "$r/proc/sys/vm"
 echo 60 >"$r/proc/sys/vm/swappiness"
 : >"$r/lib/systemd/system/armbian-zram-config.service"
+
+# A fan set up with 'hwtool fan enable' on the ROCK 4D's connector, running.
+mkdir -p "$r/etc/hwtool" "$r/sys/class/hwmon/hwmon3" "$r/sys/class/thermal/cooling_device1"
+: >"$r/boot/overlay-user/hwtool-fan.dtbo"
+cat >"$r/etc/hwtool/fan.json" <<'END'
+{"pwm": "fan", "node": "pwm2_8ch_5", "pins": [], "curve": [[50, 30], [60, 50], [70, 80], [80, 100]]}
+END
+echo pwmfan >"$r/sys/class/hwmon/hwmon3/name"
+echo 77 >"$r/sys/class/hwmon/hwmon3/pwm1"
+echo pwm-fan >"$r/sys/class/thermal/cooling_device1/type"
+echo 1 >"$r/sys/class/thermal/cooling_device1/cur_state"
+echo 4 >"$r/sys/class/thermal/cooling_device1/max_state"
+echo step_wise >"$r/sys/class/thermal/thermal_zone0/policy"
