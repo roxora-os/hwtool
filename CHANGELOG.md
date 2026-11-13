@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- PWM fan control: `hwtool fan enable` adds a fan on the board's fan
+  connector (ROCK 4D, CM5-IO) or a header PWM pin, driven by the kernel from
+  a temperature curve; `fan disable` removes it; `fan set` and `fan auto`
+  test it. The GTK app's Devices page has a Fan Control section.
+
 ## 0.2.0
 
 A pre-release: not yet tested on hardware.

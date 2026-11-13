@@ -434,13 +434,55 @@ the next clean shutdown. Without that service the trigger goes to
 ## Temperatures and fans
 
 `hwtool fan show` lists `/sys/class/thermal/thermal_zone*` with their
-temperatures and trip points, and the cooling devices. Neither board's
-device tree has a `pwm-fan` node (the CM5-IO's fan control signal, which
-ArmSoM's pinout mentions, has no fan driver in its DTB), and their cooling
-maps throttle the CPU and GPU. Trip
-points can be changed at run time only in kernels built with
-CONFIG_THERMAL_WRITABLE_TRIPS, which the edge kernel is not, so hwtool shows
-them and says why it cannot change them.
+temperatures and trip points, the cooling devices, and the fan's speed (the
+`pwm1` of the pwm-fan driver's hwmon device, 0 to 255). Neither board's
+device tree has a `pwm-fan` node, so out of the box the cooling maps only
+throttle the CPU and GPU. Trip points can be changed at run time only in
+kernels built with CONFIG_THERMAL_WRITABLE_TRIPS, which the edge kernel is
+not.
+
+`hwtool fan enable [--pwm NAME] [--curve 50:30,60:50,70:80,80:100]` adds a
+fan through a user overlay, compiled with `dtc -@` from
+`/etc/hwtool/fan.dtso` into `/boot/overlay-user/hwtool-fan.dtbo` and added to
+`user_overlays` (a reboot applies it). The overlay
+
+- adds a `pwm-fan` node (CONFIG_SENSORS_PWM_FAN=m in the edge kernel) on the
+  chosen PWM channel, with `cooling-levels` 0 and then each point's
+  percentage as 0 to 255;
+- enables that PWM controller with its pin group;
+- adds one `active` trip point per curve point to `package-thermal` (the
+  SoC package sensor; the zone names are labels in the boards' DTBs), each
+  with a 5 C hysteresis, and a cooling map that puts the fan in state k at
+  trip k, so the kernel's step_wise governor turns it up and down; it sets
+  the zone's `polling-delay` to 1 s. The existing critical trip stays.
+
+A curve has 1 to 8 points; temperatures go up within 30 to 100 C and the
+speed (0 to 100 %) does not go down. The PWM sources:
+
+- `fan` (the default), the board's fan connector. ROCK 4D: a 2-pin 1.25 mm
+  5 V connector (Radxa docs, rock4/rock4d/hardware-use/fan.md); Radxa's
+  kernel drives it from `pwm2_8ch_5`, pin group `pwm2m1_ch5` (GPIO4_C5, not
+  on the header), 60 us period (radxa/kernel linux-6.1-stan-rkr5.1,
+  `rk3576-rock-4d.dts`). CM5-IO: connector CN32 (5 V, GND and a return
+  switched by Q45/Q46), controlled by PWM2_CH6_M2, which is also header pin
+  28 (ArmSoM's cm5.md); ArmSoM's kernel uses `pwm2_8ch_6`, `pwm2m2_ch6`,
+  50 us (ArmSoM/rockchip-kernel e47316851307, `rk3576-armsom-cm5-io.dts`).
+- a header PWM function from `hwtool interfaces list`, at 25 kHz (the
+  frequency of 4-pin PC fans), for a fan driven through a transistor.
+
+Neither connector has a tachometer line, so hwtool adds no `fan-tach`. A
+fan holds its PWM channel and pins: `interfaces list` shows them as used by
+the fan, and header functions on them are refused, as is `fan enable` on a
+channel a header function uses. `hwtool fan disable` removes the overlay.
+The tests compile every generated overlay and apply it with `fdtoverlay`
+to the boards' DTBs.
+
+`hwtool fan set PERCENT` runs the fan at a fixed speed until the next boot:
+it sets the `package-thermal` governor to `user_space` (so the temperature
+no longer changes the speed; the critical trip still works) and writes the
+speed to `pwm1`. `hwtool fan auto` sets the governor back to `step_wise`.
+On UEFI images `fan enable` and `disable` refuse (the firmware owns the
+device tree); `show`, `set` and `auto` work when a pwm-fan device exists.
 
 ## Wi-Fi country
 

@@ -23,7 +23,9 @@ hwtool changes the hardware settings of a board running a
    eMMC and SD compared with the installed package, an update of the device
    the board starts from, and U-Boot's boot order where it can be saved.
 9. **LEDs, temperatures and fans**: LED triggers kept across reboots,
-   thermal zones, trip points and cooling devices.
+   thermal zones, trip points and cooling devices, and a PWM fan on the
+   board's fan connector or a header PWM pin, driven by the kernel from a
+   temperature curve.
 10. **Wi-Fi country**: the regulatory country, set now and at every boot.
 11. **Swap**: the swap file cloud-init makes at the first boot: show,
     resize, remove, and `vm.swappiness`.
@@ -82,6 +84,8 @@ sudo hwtool boot order set nvme mmc0 mmc1    # ROCK 4D; or: boot order reset
 hwtool leds list
 sudo hwtool leds set green:status heartbeat
 hwtool fan show                              # temperatures, trip points, fans
+sudo hwtool fan enable --curve 50:30,60:50,70:80,80:100   # the board's fan connector
+sudo hwtool fan set 100                      # test; then: fan auto
 hwtool wifi country
 sudo hwtool wifi country DE
 hwtool swap show
