@@ -167,13 +167,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            # A pre-release until it has passed the hardware test (part D of
-            # roxora-os/build docs/hardware-test.md); then marked as a release
-            # by hand.
+            # vX.Y.Z is a release; vX.Y.Z-beta.N (Cargo version
+            # X.Y.Z-beta.N) a beta, published as a GitHub pre-release.
             # The notes are the tag's section of CHANGELOG.md; the script
             # fails when there is none, so no release goes out without notes.
             sh packaging/release-notes.sh "${GITHUB_REF_NAME#v}" >release-notes.md
-            gh release create "$GITHUB_REF_NAME" --title "hwtool ${GITHUB_REF_NAME#v}" --prerelease \
+            beta=""
+            case "$GITHUB_REF_NAME" in *-*) beta="--prerelease" ;; esac
+            gh release create "$GITHUB_REF_NAME" --title "hwtool ${GITHUB_REF_NAME#v}" $beta \
               --notes-file release-notes.md
           fi
           gh release upload "$GITHUB_REF_NAME" output/*.deb --clobber

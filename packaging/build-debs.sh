@@ -16,6 +16,9 @@ top="$(dirname "$here")"
 target="${1:-$top/target}"
 out="${2:-$top/output}"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$top/Cargo.toml" | head -1)"
+# A beta, Cargo version 0.4.0-beta.1, is the Debian version 0.4.0~beta.1,
+# which sorts before 0.4.0 (a "-" would start a Debian revision).
+version="$(printf '%s' "$version" | sed 's/-/~/')"
 arch="$(dpkg --print-architecture)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
