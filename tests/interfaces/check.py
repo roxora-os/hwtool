@@ -106,7 +106,7 @@ for board, dtbname in DTB.items():
             want = [hex(groups[g][0]) for g in it["groups"]]
             if not pc or [hex(int(x, 16)) for x in pc.group(1).split()] != want:
                 errors.append(f"{board} {name}: pinctrl-0 is {pc.group(1) if pc else None}, want {want}")
-            if kind == "spi" and "rockchip,spidev" not in body:
+            if kind == "spi" and "armbian,spi-dev" not in body:
                 errors.append(f"{board} {name}: no spidev child")
         print(f"ok {board} {name}")
 

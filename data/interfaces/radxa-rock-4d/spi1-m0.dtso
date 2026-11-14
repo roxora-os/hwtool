@@ -13,13 +13,13 @@
 	status = "okay";
 
 	spidev@0 {
-		compatible = "rockchip,spidev";
+		compatible = "armbian,spi-dev", "rockchip,spidev";
 		reg = <0>;
 		spi-max-frequency = <10000000>;
 	};
 
 	spidev@1 {
-		compatible = "rockchip,spidev";
+		compatible = "armbian,spi-dev", "rockchip,spidev";
 		reg = <1>;
 		spi-max-frequency = <10000000>;
 	};

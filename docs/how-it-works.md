@@ -374,8 +374,12 @@ the installed `.dtbo` files again after the package is installed.
 
 Each overlay sets `pinctrl-0` and `status = "okay"` on the controller
 (`&i2c5`, `&spi1`, `&uart3`, `&pwm1_6ch_0`, ...). SPI overlays add
-`rockchip,spidev` children on each chip select, which the kernel's spidev
-driver (CONFIG_SPI_SPIDEV=m in the edge kernel) binds to `/dev/spidevB.C`.
+children on each chip select with `compatible = "armbian,spi-dev",
+"rockchip,spidev"`, which the kernel's spidev driver (CONFIG_SPI_SPIDEV=m)
+binds to `/dev/spidevB.C`. The edge kernel's spidev lists `armbian,spi-dev`
+and not `rockchip,spidev` (`modinfo spidev`, 7.3.3-edge-rockchip64): with
+`rockchip,spidev` alone it created `spi1.0` and `spi1.1` on a ROCK 4D but no
+`/dev/spidev1.*`. `rockchip,spidev` stays second for kernels that list it.
 1-Wire adds a `w1-gpio` node on header pin 7 (CONFIG_W1_MASTER_GPIO=m) and
 needs an external pull-up of about 4.7 kOhm.
 

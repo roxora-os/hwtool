@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fix: `interfaces enable` for SPI made no `/dev/spidev*` on the edge
+  kernel. The overlays named the spidev nodes `rockchip,spidev`, which the
+  edge kernel's spidev driver does not match; they now name
+  `armbian,spi-dev` first. Found on a ROCK 4D in the hardware test (D16).
+
 ## 0.3.0
 
 A pre-release: not yet tested on hardware.

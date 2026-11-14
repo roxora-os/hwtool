@@ -226,7 +226,7 @@ pub fn enable_plan(root: &Root, names: &[String]) -> Result<Plan> {
         }
         match e.interface.kind.as_str() {
             "spi" => p.notices.push(format!(
-                "{}: /dev/spidev devices appear after the reboot (the spidev module loads for the rockchip,spidev nodes).",
+                "{}: /dev/spidev devices appear after the reboot (the spidev driver binds to the armbian,spi-dev nodes).",
                 e.interface.title
             )),
             "w1" => p.notices.push(

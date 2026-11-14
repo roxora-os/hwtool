@@ -108,7 +108,7 @@ def overlay(compat, kind, label, groups, pins, gpios):
         for cs in sorted(v for v in pins.values() if v.startswith("CS")):
             i = int(cs[2:])
             body += (
-                f"\n\tspidev@{i} {{\n\t\tcompatible = \"rockchip,spidev\";\n"
+                f"\n\tspidev@{i} {{\n\t\tcompatible = \"armbian,spi-dev\", \"rockchip,spidev\";\n"
                 f"\t\treg = <{i}>;\n\t\tspi-max-frequency = <10000000>;\n\t}};\n"
             )
     return head + body + "};\n"
