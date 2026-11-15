@@ -12,8 +12,8 @@ use hwtool_core::bootloader::{self, Target};
 use hwtool_core::exec::SystemExecutor;
 use hwtool_core::plan::{self, Action, Plan};
 use hwtool_core::{
-    bootenv, bootinfo, cpu, fan, interfaces, kernel, leds, migrate, npu, overlays, swap, thermal,
-    uefi, wifi, Root,
+    bootenv, bootinfo, cpu, fan, interfaces, kernel, leds, migrate, npu, overlays, progress, swap,
+    thermal, uefi, wifi, Root,
 };
 
 // Output never panics: when the terminal or the pipe to the GTK app is
@@ -56,6 +56,12 @@ struct Change {
     /// what the user confirmed.
     #[arg(long, value_name = "FINGERPRINT")]
     expect_plan: Option<String>,
+    /// While the change runs, print its progress on standard output as one
+    /// JSON object per line (the steps, how far a step is, the output and
+    /// the result) instead of text on standard error. For programs such as
+    /// the GTK app; see docs/how-it-works.md.
+    #[arg(long)]
+    progress_json: bool,
 }
 
 #[derive(Subcommand)]
@@ -414,6 +420,17 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(code) => code,
         Err(e) => {
+            // A run that was refused before its plan started still ends
+            // the progress stream with a result.
+            if progress::enabled() && !progress::done_sent() {
+                progress::emit(&progress::Event::Done {
+                    ok: false,
+                    log: None,
+                    reboot: false,
+                    failed_step: None,
+                    error: Some(format!("{e:#}")),
+                });
+            }
             errln!("hwtool: {e:#}");
             ExitCode::from(1)
         }
@@ -627,6 +644,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 dry_run: false,
                 yes: true,
                 expect_plan: None,
+                progress_json: false,
             };
             apply(cli, &root, &mut exec, p, change)
         }
@@ -916,7 +934,32 @@ fn apply(
         }
         return Ok(ExitCode::SUCCESS);
     }
+    // From here on standard output carries the progress events only.
+    let events = change.progress_json;
+    if events {
+        progress::enable();
+    }
     if plan.is_empty() {
+        if events {
+            progress::emit(&progress::Event::Plan {
+                title: plan.title.clone(),
+                steps: Vec::new(),
+                reboot: false,
+            });
+            for line in plan.render().lines().filter(|l| !l.is_empty()) {
+                progress::emit(&progress::Event::Log {
+                    line: line.to_string(),
+                });
+            }
+            progress::emit(&progress::Event::Done {
+                ok: true,
+                log: None,
+                reboot: false,
+                failed_step: None,
+                error: None,
+            });
+            return Ok(ExitCode::SUCCESS);
+        }
         outp!("{}", plan.render());
         for n in &plan.notices {
             outln!("{n}");
@@ -947,7 +990,9 @@ fn apply(
             );
         }
     }
-    errp!("{}", plan.render());
+    if !events {
+        errp!("{}", plan.render());
+    }
     if !change.yes {
         if !io::stdin().is_terminal() {
             bail!("not asking for confirmation without a terminal; add --yes to go ahead");
@@ -960,6 +1005,11 @@ fn apply(
             errln!("Nothing was changed.");
             return Ok(ExitCode::from(3));
         }
+    }
+    if events {
+        // The done event says how it went and whether to reboot.
+        plan.execute(root, exec, &plan::utc_stamp())?;
+        return Ok(ExitCode::SUCCESS);
     }
     errln!();
     plan.execute(root, exec, &plan::utc_stamp())?;

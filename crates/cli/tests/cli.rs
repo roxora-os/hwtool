@@ -5,6 +5,7 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use hwtool_core::progress::{Event, State};
 use tempfile::TempDir;
 
 const ENV: &str = "verbosity=1\noverlay_prefix=rockchip-rk3576\nrootdev=UUID=x\nrootfstype=ext4\n";
@@ -257,4 +258,207 @@ fn option_like_overlay_names_are_refused() {
     let o = hwtool(d.path(), &["overlays", "enable", "--dry-run", "--", "-x"]);
     assert!(!o.status.success());
     assert!(text(&o).contains("invalid overlay name"), "{}", text(&o));
+}
+
+/// The events of a `--progress-json` run, one per line of standard output.
+fn events(o: &Output) -> Vec<Event> {
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(|l| Event::decode(l).unwrap_or_else(|| panic!("not a progress event: {l}")))
+        .collect()
+}
+
+fn not_log(events: &[Event]) -> Vec<Event> {
+    events
+        .iter()
+        .filter(|e| !matches!(e, Event::Log { .. }))
+        .cloned()
+        .collect()
+}
+
+fn step(step: usize, title: &str, state: State) -> Event {
+    Event::Step {
+        step,
+        of: 2,
+        title: title.into(),
+        state,
+        error: None,
+    }
+}
+
+#[test]
+fn progress_json_reports_a_run_in_order() {
+    let d = fake();
+    let o = hwtool(
+        d.path(),
+        &["overlays", "enable", "uart1", "--yes", "--progress-json"],
+    );
+    assert!(o.status.success(), "{}", text(&o));
+    // Nothing but events on standard output, and no text on standard error.
+    assert_eq!(String::from_utf8_lossy(&o.stderr), "");
+    let all = events(&o);
+    let Some(Event::Done { log: Some(log), .. }) = all.last().cloned() else {
+        panic!("the last event is not done with a log: {all:?}");
+    };
+    assert!(
+        log.starts_with("/var/log/hwtool/") && log.ends_with(".log"),
+        "{log}"
+    );
+    let (backup, write) = (
+        "Back up /boot/armbianEnv.txt",
+        "Write the new /boot/armbianEnv.txt",
+    );
+    let Event::Plan {
+        title,
+        steps,
+        reboot,
+    } = &all[0]
+    else {
+        panic!("the first event is not the plan: {all:?}");
+    };
+    assert!(title.contains("uart1"), "{title}");
+    assert_eq!(steps, &[backup.to_string(), write.to_string()]);
+    assert!(*reboot);
+    assert_eq!(
+        not_log(&all)[1..],
+        [
+            step(1, backup, State::Running),
+            step(1, backup, State::Done),
+            step(2, write, State::Running),
+            step(2, write, State::Done),
+            Event::Done {
+                ok: true,
+                log: Some(log.clone()),
+                reboot: true,
+                failed_step: None,
+                error: None,
+            },
+        ]
+    );
+    // The text of a run arrives as log events, each between the events of
+    // its step, and is the content of the log file.
+    let lines: Vec<String> = all
+        .iter()
+        .filter_map(|e| match e {
+            Event::Log { line } => Some(line.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines[0], format!("Log: {log}"));
+    assert_eq!(lines[1], format!("[1/2] {backup}"));
+    assert!(
+        lines[2]
+            .trim_start()
+            .starts_with("backup: /var/backups/hwtool/"),
+        "{lines:?}"
+    );
+    assert_eq!(lines[3], format!("[2/2] {write}"));
+    let at = |e: &Event| all.iter().position(|x| x == e).unwrap();
+    let first_line = at(&Event::Log {
+        line: lines[1].clone(),
+    });
+    assert!(at(&step(1, backup, State::Running)) < first_line);
+    assert!(first_line < at(&step(1, backup, State::Done)));
+    let file = fs::read_to_string(d.path().join(log.trim_start_matches('/'))).unwrap();
+    assert_eq!(file, lines.join("\n") + "\n");
+    assert!(fs::read_to_string(d.path().join("boot/armbianEnv.txt"))
+        .unwrap()
+        .ends_with("overlays=uart1\n"));
+}
+
+#[test]
+fn progress_json_reports_the_step_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = fake();
+    // The backup goes to /var; /boot cannot be written, so step 2 fails.
+    let boot = d.path().join("boot");
+    fs::set_permissions(&boot, fs::Permissions::from_mode(0o555)).unwrap();
+    let o = hwtool(
+        d.path(),
+        &["overlays", "enable", "uart1", "--yes", "--progress-json"],
+    );
+    fs::set_permissions(&boot, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    let all = not_log(&events(&o));
+    let n = all.len();
+    let Event::Step {
+        step: 2,
+        state: State::Failed,
+        error: Some(step_error),
+        ..
+    } = &all[n - 2]
+    else {
+        panic!("no failed step before the end: {all:?}");
+    };
+    assert!(step_error.contains("cannot create"), "{step_error}");
+    let Event::Done {
+        ok: false,
+        log: Some(_),
+        reboot: false,
+        failed_step: Some(2),
+        error: Some(error),
+    } = &all[n - 1]
+    else {
+        panic!("the last event is not the failure: {all:?}");
+    };
+    assert!(
+        error.contains("step 2 failed: Write the new /boot/armbianEnv.txt"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(boot.join("armbianEnv.txt")).unwrap(),
+        ENV
+    );
+}
+
+#[test]
+fn progress_json_ends_a_refused_run_with_done() {
+    let d = fake();
+    let o = hwtool(
+        d.path(),
+        &[
+            "overlays",
+            "enable",
+            "--yes",
+            "--progress-json",
+            "--expect-plan",
+            "0000000000000000",
+            "--",
+            "uart1",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    let all = events(&o);
+    let [Event::Done {
+        ok: false,
+        log: None,
+        error: Some(error),
+        ..
+    }] = all.as_slice()
+    else {
+        panic!("expected one done event: {all:?}");
+    };
+    assert!(error.contains("the plan changed"), "{error}");
+    assert!(
+        text(&o).contains("hwtool: the plan changed"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn without_progress_json_the_output_is_text() {
+    let d = fake();
+    let o = hwtool(d.path(), &["overlays", "enable", "uart1", "--yes"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "");
+    let err = String::from_utf8_lossy(&o.stderr);
+    for want in [
+        "[1/2] Back up /boot/armbianEnv.txt\n",
+        "[2/2] Write the new /boot/armbianEnv.txt\n",
+        "\nDone.\nReboot for the change to take effect.\n",
+    ] {
+        assert!(err.contains(want), "{err}");
+    }
+    assert!(!err.contains("{\"event\""), "{err}");
 }
