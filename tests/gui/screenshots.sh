@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
 # Screenshots of every page of the GTK app, wide and narrow, light and dark,
-# plus the busy state, a confirmation dialog and an unknown board. Needs a
+# plus the busy state, a confirmation dialog, a change that runs, fails and
+# is done, and an unknown board. Needs a
 # hwtool-gtk built with the test-hooks feature and a display (CI runs this
 # under xvfb-run; GDK_BACKEND=broadway works too).
 #
@@ -59,6 +60,20 @@ for theme in light dark; do
   shot "confirm-$theme" "$work/demo" HWTOOL_GTK_PAGE=boot HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_CONFIRM=1
   shot "confirm-narrow-$theme" "$work/demo" HWTOOL_GTK_PAGE=boot HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_CONFIRM=1 HWTOOL_GTK_SIZE=360x700
   shot "unknown-board-$theme" "$work/unknown" HWTOOL_GTK_PAGE=board HWTOOL_GTK_DARK=$dark
+  # A change that runs: a recorded kernel switch in the middle of a step
+  # and failed, then a real change (an overlay enabled in a copy of the
+  # demo root, without pkexec) from the confirmed plan to its result.
+  shot "apply-running-$theme" "$work/demo" HWTOOL_GTK_PAGE=kernel HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_APPLY=running
+  shot "apply-running-narrow-$theme" "$work/demo" HWTOOL_GTK_PAGE=kernel HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_APPLY=running HWTOOL_GTK_SIZE=360x700
+  shot "apply-failed-$theme" "$work/demo" HWTOOL_GTK_PAGE=kernel HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_APPLY=failed
+  rm -rf "$work/apply"
+  cp -a "$work/demo" "$work/apply"
+  shot "apply-done-$theme" "$work/apply" HWTOOL_GTK_PAGE=overlays HWTOOL_GTK_DARK=$dark HWTOOL_GTK_DEMO_APPLY=real HWTOOL_GTK_NO_PKEXEC=1
+  if ! grep -q '^user_overlays=.*sample-display' "$work/apply/boot/armbianEnv.txt" \
+    || ! ls "$work/apply"/var/log/hwtool/*.log >/dev/null; then
+    echo "the app did not apply the change" >&2
+    exit 1
+  fi
   for page in board boot overlays interfaces; do
     shot "uefi-$page-$theme" "$work/uefi" HWTOOL_GTK_PAGE=$page HWTOOL_GTK_DARK=$dark
   done

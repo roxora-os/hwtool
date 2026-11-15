@@ -176,7 +176,11 @@ in_root hwtool kernel switch vendor --dry-run | tee /tmp/switch-dry.txt
 grep -q 'rebuild the package from the dpkg database' /tmp/switch-dry.txt || fail "dry run does not show the rebuild"
 grep -q 'copy /var/cache/apt/archives/linux-u-boot-radxa-rock-4d-edge_26.11.0-trunk_arm64.deb' /tmp/switch-dry.txt \
   || fail "dry run does not show the U-Boot copy"
-in_root hwtool kernel switch vendor --yes
+# With the progress events the GTK app reads: standard output carries
+# nothing else, and apt reports how far it is.
+in_root hwtool kernel switch vendor --yes --progress-json >/tmp/switch-events.txt
+cat /tmp/switch-events.txt
+python3 "$here/check-events.py" /tmp/switch-events.txt || fail "the progress events of the switch are wrong"
 [[ "$(readlink "$r/boot/Image")" == vmlinuz-6.1.115-vendor-rk35xx ]] || fail "/boot/Image: $(readlink "$r/boot/Image")"
 [[ "$(readlink "$r/boot/dtb")" == dtb-6.1.115-vendor-rk35xx ]] || fail "/boot/dtb: $(readlink "$r/boot/dtb")"
 grep -qx 'overlay_prefix=rk3576' "$r/boot/armbianEnv.txt" || fail "overlay_prefix not switched"
