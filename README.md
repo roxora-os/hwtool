@@ -50,6 +50,23 @@ There are two packages:
 | `roxora-hwtool` | `hwtool`, the command line tool. No GUI dependencies. |
 | `roxora-hwtool-gtk` | `hwtool-gtk`, a GTK 4 and libadwaita app ("Hardware Tool") that runs `hwtool` through polkit. |
 
+## Screenshots
+
+The desktop app (`hwtool-gtk`) on a Radxa ROCK 4D, in GNOME's light and dark
+styles. The pictures come from the app's CI run, which drives it under Xvfb.
+
+| | |
+| --- | --- |
+| ![The Board page: model, SoC, kernel branch, bootloader package and storage](docs/screenshots/board-wide-light.webp) | ![The Pin Header page: I2C, SPI and UART functions of the 40-pin header as switches](docs/screenshots/interfaces-wide-dark.webp) |
+| Board: model, kernel and storage at a glance | Pin header: functions as switches; ones that share pins are greyed out |
+| ![The Kernel page: kernel branches, held packages and headers](docs/screenshots/kernel-wide-light.webp) | ![The NPU page: the NPU driver and charsiu](docs/screenshots/npu-wide-dark.webp) |
+| Kernel: switch branch, hold packages, headers | NPU: driver status and charsiu |
+
+![Applying a kernel branch switch: step 5 of 9 at 62 %, with the steps done, running and waiting](docs/screenshots/apply-running-light.webp)
+
+Applying a change: each step of the plan, the step running now with its own
+progress, and the overall progress bar.
+
 ## Using it
 
 ```
