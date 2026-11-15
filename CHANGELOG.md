@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The GTK app shows how a change is going. After the confirmation a dialog
+  lists the plan's steps (waiting, running, done, failed), a progress bar
+  for the whole change, the last line of output and, behind Output, all of
+  it. Package installs and removals (apt), copying the system to another
+  device (rsync) and writing U-Boot to SPI flash (flashcp) move the bar
+  within their step. At the end it says Done and whether to reboot, or
+  which step failed and why, and names the log file.
+- `--progress-json` on every command that changes something: the progress
+  of the run as one JSON object per line on standard output (plan, step,
+  progress, cleanup, log, done), for programs such as the GTK app. Without
+  it the output is unchanged. See "Progress events" in
+  docs/how-it-works.md.
 - Fix: `interfaces enable` for SPI made no `/dev/spidev*` on the edge
   kernel. The overlays named the spidev nodes `rockchip,spidev`, which the
   edge kernel's spidev driver does not match; they now name

@@ -118,7 +118,10 @@ Every command that changes something:
   on the boot device; migration never writes to it).
 
 Overlay, interface, kernel and boot order changes take effect after a reboot. `--json` gives
-machine-readable output; the GTK app uses it.
+machine-readable output; the GTK app uses it. `--progress-json` on a change
+gives its progress as one JSON object per line (see "Progress events" in
+[docs/how-it-works.md](docs/how-it-works.md)); the GTK app shows it as a
+list of steps and a progress bar.
 
 ## Building
 

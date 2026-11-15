@@ -34,6 +34,10 @@ the plan and changes nothing; otherwise hwtool prints it, asks, and runs it.
   left out); `--expect-plan <fingerprint>` makes a run refuse if its own plan
   differs. The GTK app confirms a dry run made as the user and passes its
   fingerprint to the run as root.
+- **Progress for programs.** `--progress-json` (with `--yes`) makes a run
+  print its progress on standard output, one JSON object per line, instead
+  of text on standard error; see [Progress events](#progress-events). The
+  log file is written as always.
 - **Which disks are in use.** hwtool traces `/` from `/proc/self/mountinfo`
   through its device number in `/sys/dev/block` (and through device-mapper
   slaves) to the disk, and adds the disk of a separate `/boot` and the
@@ -42,6 +46,56 @@ the plan and changes nothing; otherwise hwtool prints it, asks, and runs it.
   refuse.
 - **Test options.** `--root <dir>` (tests) is refused when hwtool runs with
   root rights (euid 0, sudo or pkexec).
+
+## Progress events
+
+`hwtool <command> --yes --progress-json` prints these lines on standard
+output while the change runs. Each line is one JSON object with an `event`
+member. Standard error stays empty unless the run is refused, and the exit
+status is 0 or 1 as without the option.
+
+```
+{"event":"plan","title":"Enable overlays: uart1","steps":["Back up /boot/armbianEnv.txt","Write the new /boot/armbianEnv.txt"],"reboot":true}
+{"event":"log","line":"Log: /var/log/hwtool/20261115T093012Z.log"}
+{"event":"step","step":1,"of":2,"title":"Back up /boot/armbianEnv.txt","state":"running"}
+{"event":"log","line":"[1/2] Back up /boot/armbianEnv.txt"}
+{"event":"step","step":1,"of":2,"title":"Back up /boot/armbianEnv.txt","state":"done"}
+{"event":"step","step":2,"of":2,"title":"Write the new /boot/armbianEnv.txt","state":"running"}
+{"event":"step","step":2,"of":2,"title":"Write the new /boot/armbianEnv.txt","state":"done"}
+{"event":"done","ok":true,"log":"/var/log/hwtool/20261115T093012Z.log","reboot":true}
+```
+
+| Event | Members |
+| --- | --- |
+| `plan` | `title`, `steps` (the description of each step), `reboot` (the plan needs a reboot). The first event. |
+| `step` | `step` (from 1), `of`, `title`, `state`: `running`, `done` or `failed`; with `failed` also `error`. |
+| `progress` | `step`, and any of `percent` (0 to 100, never going back within a step), `bytes`, `total`, `detail` (a few words, such as the package apt is unpacking). Only for steps that can tell how far they are. |
+| `cleanup` | `title`, `state`, `error`: a cleanup step after a failure. |
+| `log` | `line`: one line of what hwtool and the programs it runs print, as in the log file. |
+| `done` | `ok`, `reboot` (it worked and needs a reboot), and where they apply `log` (the log file), `failed_step`, `error`. The last event. A run refused before its plan started (wrong fingerprint, no root rights) prints only this event. |
+
+A reader should skip events and members it does not know.
+
+Steps that report how far they are:
+
+- **apt-get** `install`, `remove`, `purge` and `update` (kernel switch and
+  revert, kernel headers, charsiu, the packages hwtool installs for a
+  command). hwtool adds `-o APT::Status-Fd=<n>` and reads apt's `dlstatus`
+  and `pmstatus` lines from that descriptor. For an install the downloads
+  count for the first 40 % and dpkg for the rest.
+- **rsync** when the system is copied to another device. hwtool adds
+  `--info=progress2 --no-inc-recursive`, so rsync lists all files first and
+  then prints one overall percentage, which hwtool reports with the bytes
+  copied and the speed instead of logging it.
+- **flashcp -v** when U-Boot is written to SPI flash: its erase, write and
+  verify passes count for a third each.
+
+These options are added only with `--progress-json`. They change what the
+programs report and not what they do; the log names them (`for progress,
+run with: ...`). Every other step (dtc, mkfs, dd to SD or eMMC, fallocate,
+file writes) reports `running` and then `done` or `failed`. The apt-get
+calls inside the script that reinstalls the old packages after a failed
+kernel switch are not followed either.
 
 ## Which board
 
@@ -590,7 +644,8 @@ pages, and a status page with the reason on Overlays and Pin Header.
 Settings: a sidebar with the pages Board, Overlays, Pin Header, Kernel,
 Boot, CPU, Memory, Devices and NPU (an AdwNavigationSplitView that shows one
 pane at a time on narrow screens), destructive actions in their own groups,
-confirmations as dialogs that show the plan, results as toasts, and a
+confirmations as dialogs that show the plan, a dialog with the steps and a
+progress bar while a change runs, and a
 status page for boards it does not recognise. It runs as the user and
 refuses to run as root. It reads state
 with `hwtool --json`, shows the output of `hwtool ... --dry-run` in a
@@ -599,9 +654,22 @@ confirmation dialog, and runs the change with
 is what was confirmed. The polkit action `io.github.roxora_os.hwtool.run`
 asks for an administrator password. The U-Boot versions on the boot
 devices are read the same way, after a Check button, because reading the
-devices needs root. While a change runs, the pages are
-insensitive, a banner says not to switch the board off, and the window
-cannot be closed. Names (overlays, branches) are passed after `--`.
+devices needs root. Names (overlays, branches) are passed after `--`.
+
+While a change runs, the app shows a dialog that cannot be closed: the
+plan's steps, each with its number, a spinner while it runs, a check mark
+when it is done or an error sign when it failed; a progress bar for the
+whole change (steps done out of all steps, plus the running step's own
+share where the step reports one, pulsing where it does not); the last line
+of output under the bar; and the full output behind an Output expander.
+The app runs hwtool with `--progress-json` in a thread of its own and reads
+the [progress events](#progress-events) as they arrive, so the window stays
+responsive. At the end the dialog says Done, with "Reboot for the change to
+take effect." where that applies, or which step failed and why, with the
+cleanup steps and the output open; both name the log file. If the password
+dialog is dismissed it says that nothing was changed. Behind the dialog the
+pages are insensitive, a banner says not to switch the board off, and the
+window cannot be closed.
 
 The variables HWTOOL_CLI, HWTOOL_ROOT and HWTOOL_GTK_NO_PKEXEC exist only in
 builds with the `test-hooks` feature, which CI uses for screenshots and
