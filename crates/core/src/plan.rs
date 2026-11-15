@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::env::BootEnv;
 use crate::exec::Executor;
 use crate::out::say;
+use crate::progress::{self, Event, State};
 use crate::root::Root;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -209,18 +210,39 @@ impl Plan {
         }
         let stamp = stamp.as_str();
         crate::signals::install();
+        progress::emit(&Event::Plan {
+            title: self.title.clone(),
+            steps: self.steps.iter().map(|s| s.description.clone()).collect(),
+            reboot: self.reboot_required,
+        });
         let log = crate::out::open_log(root, stamp)?;
         say(&format!("Log: {log}"));
-        let result = self.run_steps(root, exec, stamp);
+        let mut failed_step = None;
+        let result = self.run_steps(root, exec, stamp, &mut failed_step);
         if let Err(e) = &result {
             say(&format!("Failed: {e:#}"));
         }
         say(&format!("Log: {log}"));
         crate::out::close_log();
+        progress::emit(&Event::Done {
+            ok: result.is_ok(),
+            log: Some(log),
+            reboot: result.is_ok() && self.reboot_required,
+            failed_step,
+            error: result.as_ref().err().map(|e| format!("{e:#}")),
+        });
         result
     }
 
-    fn run_steps(&self, root: &Root, exec: &mut dyn Executor, stamp: &str) -> Result<()> {
+    /// `failed_step` is set to the step that failed, counting from 1.
+    fn run_steps(
+        &self,
+        root: &Root,
+        exec: &mut dyn Executor,
+        stamp: &str,
+        failed_step: &mut Option<usize>,
+    ) -> Result<()> {
+        let of = self.steps.len();
         let mut last_started: Option<usize> = None;
         let mut failure: Option<anyhow::Error> = None;
         for (i, step) in self.steps.iter().enumerate() {
@@ -228,17 +250,29 @@ impl Plan {
                 failure = Some(anyhow!("interrupted by a signal before step {}", i + 1));
                 break;
             }
-            say(&format!(
-                "[{}/{}] {}",
-                i + 1,
-                self.steps.len(),
-                step.description
-            ));
+            let event = |state: State, error: Option<String>| {
+                progress::emit(&Event::Step {
+                    step: i + 1,
+                    of,
+                    title: step.description.clone(),
+                    state,
+                    error,
+                });
+            };
+            progress::set_step(i + 1);
+            event(State::Running, None);
+            say(&format!("[{}/{}] {}", i + 1, of, step.description));
             last_started = Some(i);
-            if let Err(e) = apply(root, exec, stamp, &step.action) {
+            let result = apply(root, exec, stamp, &step.action);
+            crate::out::end_line();
+            progress::set_step(0);
+            if let Err(e) = result {
+                event(State::Failed, Some(format!("{e:#}")));
+                *failed_step = Some(i + 1);
                 failure = Some(e.context(format!("step {} failed: {}", i + 1, step.description)));
                 break;
             }
+            event(State::Done, None);
         }
         let Some(err) = failure else {
             return Ok(());
@@ -246,11 +280,25 @@ impl Plan {
         let mut report = Vec::new();
         if let Some(at) = last_started {
             for c in self.cleanup.iter().filter(|c| c.from <= at && at <= c.to) {
+                let event = |state: State, error: Option<String>| {
+                    progress::emit(&Event::Cleanup {
+                        title: c.step.description.clone(),
+                        state,
+                        error,
+                    });
+                };
+                event(State::Running, None);
                 say(&format!("Cleanup: {}", c.step.description));
-                match apply(root, exec, stamp, &c.step.action) {
-                    Ok(()) => report.push(format!("done: {}", c.step.description)),
+                let result = apply(root, exec, stamp, &c.step.action);
+                crate::out::end_line();
+                match result {
+                    Ok(()) => {
+                        event(State::Done, None);
+                        report.push(format!("done: {}", c.step.description));
+                    }
                     Err(e) => {
                         say(&format!("Cleanup failed: {e:#}"));
+                        event(State::Failed, Some(format!("{e:#}")));
                         report.push(format!("FAILED: {}: {e:#}", c.step.description));
                     }
                 }

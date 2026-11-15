@@ -28,6 +28,7 @@ pub mod npu;
 pub mod out;
 pub mod overlays;
 pub mod plan;
+pub mod progress;
 pub mod repack;
 pub mod root;
 pub mod signals;
