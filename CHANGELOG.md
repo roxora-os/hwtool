@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+The first normal release; earlier versions were pre-releases. A tag with
+a suffix (v0.5.0-beta.1) now publishes a beta.
 
 - The GTK app shows how a change is going. After the confirmation a dialog
   lists the plan's steps (waiting, running, done, failed), a progress bar
