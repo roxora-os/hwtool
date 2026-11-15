@@ -779,7 +779,8 @@ fn demo_apply(ctx: &Shared, failed: bool) {
         // Stays in the middle of step 5: the sender is never dropped.
         std::mem::forget(tx);
     }
-    follow(ctx, Model::new(&[]), rx);
+    let plan: Vec<String> = steps.iter().map(|s| s.to_string()).collect();
+    follow(ctx, Model::new(&[plan]), rx);
 }
 
 /// One step in the list of the running change.
@@ -931,8 +932,6 @@ impl ApplyView {
         let scroll = gtk::ScrolledWindow::builder()
             .child(&body)
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .propagate_natural_height(true)
-            .max_content_height(460)
             .vexpand(true)
             .build();
 
@@ -953,9 +952,13 @@ impl ApplyView {
         view.add_top_bar(&header);
         view.set_content(Some(&content));
         view.add_bottom_bar(&close);
+        // Room for the steps of a short plan; a long one scrolls.
+        let steps = i32::try_from(model.steps.len()).unwrap_or(i32::MAX);
+        let height = steps.saturating_mul(56).saturating_add(250).clamp(380, 720);
         let dialog = adw::Dialog::builder()
             .title("Applying the Change")
             .content_width(640)
+            .content_height(height)
             .can_close(false)
             .child(&view)
             .build();
