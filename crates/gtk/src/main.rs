@@ -5,8 +5,10 @@
 //! confirmation dialog, and runs the change with
 //! `pkexec /usr/bin/hwtool ... --yes --expect-plan <fingerprint>` (polkit
 //! action io.github.roxora_os.hwtool.run), so what runs as root is the plan
-//! the user confirmed. While a change runs the pages are insensitive, a
-//! banner says so, and the window cannot be closed.
+//! the user confirmed. While a change runs a dialog lists the plan's steps
+//! with their state, a progress bar and hwtool's output, read from
+//! `--progress-json`; the pages are insensitive, a banner says so, and the
+//! window cannot be closed.
 //!
 //! Uses libadwaita 1.5 (Ubuntu 24.04), laid out like GNOME Settings: an
 //! AdwNavigationSplitView with the pages in a sidebar, collapsed to one
@@ -21,19 +23,27 @@
 //! and HWTOOL_GTK_SCREENSHOT (save the window as PNG to that path, then
 //! quit). Built with the `test-hooks` feature only, for CI: HWTOOL_CLI,
 //! HWTOOL_ROOT (passed as --root), HWTOOL_GTK_NO_PKEXEC=1,
-//! HWTOOL_GTK_DEMO_BUSY=1 and HWTOOL_GTK_DEMO_CONFIRM=1 (open the
-//! confirmation of a bootloader write). Release packages are built without
-//! it, so the app always runs /usr/bin/hwtool through pkexec.
+//! HWTOOL_GTK_DEMO_BUSY=1, HWTOOL_GTK_DEMO_CONFIRM=1 (open the
+//! confirmation of a bootloader write) and HWTOOL_GTK_DEMO_APPLY (`real`
+//! enables the overlay sample-display without asking; `running` and
+//! `failed` show a recorded kernel switch). Release packages are built
+//! without it, so the app always runs /usr/bin/hwtool through pkexec.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 use serde_json::Value;
+
+mod progress;
+
+use progress::{Model, Outcome, StepState};
 
 const APP_ID: &str = "io.github.roxora_os.HwTool";
 
@@ -346,6 +356,19 @@ fn build_ui(app: &adw::Application) {
             let c = Cmd::new(&["boot", "write-bootloader", "--target", "spi"]);
             propose(&ctx, "Write the Bootloader?", vec![c], true);
         }
+        match std::env::var("HWTOOL_GTK_DEMO_APPLY").as_deref() {
+            Ok("real") => {
+                let mut c = Cmd::new(&["overlays", "enable"]);
+                c.names = vec!["sample-display".to_string()];
+                match dry_run(&ctx, &[c]) {
+                    Ok(p) => execute(&ctx, p.commands),
+                    Err(e) => alert(&ctx, "Not Possible", &strip_prefix(&e)),
+                }
+            }
+            Ok("running") => demo_apply(&ctx, false),
+            Ok("failed") => demo_apply(&ctx, true),
+            _ => {}
+        }
     }
     if let Ok(path) = std::env::var("HWTOOL_GTK_SCREENSHOT") {
         let app = app.clone();
@@ -411,6 +434,51 @@ fn strip_prefix(e: &str) -> String {
     e.strip_prefix("hwtool: ").unwrap_or(e).to_string()
 }
 
+/// A command whose plan was shown: the plan's fingerprint and its steps.
+#[derive(Clone)]
+struct Confirmed {
+    cmd: Cmd,
+    fingerprint: String,
+    steps: Vec<String>,
+}
+
+struct Proposal {
+    /// The plans as text, for the confirmation.
+    text: String,
+    commands: Vec<Confirmed>,
+}
+
+/// Ask hwtool, as the user, what `commands` would do.
+fn dry_run(ctx: &Ctx, commands: &[Cmd]) -> Result<Proposal, String> {
+    let mut text = String::new();
+    let mut confirmed = Vec::new();
+    for c in commands {
+        let mut a = vec!["--json".to_string()];
+        a.extend(c.argv(&["--dry-run".to_string()]));
+        let v = run_cli(ctx, &a)
+            .and_then(|o| serde_json::from_str::<Value>(&o).map_err(|e| e.to_string()))?;
+        text.push_str(v["text"].as_str().unwrap_or(""));
+        text.push('\n');
+        let steps = v["plan"]["steps"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|s| s["description"].as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        confirmed.push(Confirmed {
+            cmd: c.clone(),
+            fingerprint: v["fingerprint"].as_str().unwrap_or("").to_string(),
+            steps,
+        });
+    }
+    Ok(Proposal {
+        text,
+        commands: confirmed,
+    })
+}
+
 /// Show what `commands` would do, and run them after the user agrees.
 fn propose(ctx: &Shared, heading: &str, commands: Vec<Cmd>, destructive: bool) {
     propose_or(ctx, heading, commands, destructive, || {});
@@ -430,29 +498,15 @@ fn propose_or(
         cancelled();
         return;
     }
-    let mut text = String::new();
-    let mut confirmed = Vec::new();
-    let mut reboot = false;
-    for c in &commands {
-        let mut a = vec!["--json".to_string()];
-        a.extend(c.argv(&["--dry-run".to_string()]));
-        match run_cli(ctx, &a)
-            .and_then(|o| serde_json::from_str::<Value>(&o).map_err(|e| e.to_string()))
-        {
-            Ok(v) => {
-                text.push_str(v["text"].as_str().unwrap_or(""));
-                let fp = v["fingerprint"].as_str().unwrap_or("").to_string();
-                reboot |= v["plan"]["reboot_required"].as_bool() == Some(true);
-                confirmed.push((c.clone(), fp));
-            }
-            Err(e) => {
-                alert(ctx, "Not Possible", &strip_prefix(&e));
-                cancelled();
-                return;
-            }
+    let proposal = match dry_run(ctx, &commands) {
+        Ok(p) => p,
+        Err(e) => {
+            alert(ctx, "Not Possible", &strip_prefix(&e));
+            cancelled();
+            return;
         }
-        text.push('\n');
-    }
+    };
+    let (text, confirmed) = (proposal.text, proposal.commands);
     let dialog = adw::AlertDialog::new(
         Some(heading),
         Some("hwtool will do exactly this, as administrator. Read it before you go on."),
@@ -473,7 +527,7 @@ fn propose_or(
     let ctx2 = ctx.clone();
     dialog.connect_response(None, move |_, r| {
         if r == "apply" {
-            execute(&ctx2, confirmed.clone(), reboot);
+            execute(&ctx2, confirmed.clone());
         } else {
             cancelled();
         }
@@ -511,79 +565,521 @@ fn set_busy(ctx: &Ctx, busy: bool) {
     ctx.banner.set_revealed(busy);
 }
 
-fn execute(ctx: &Shared, commands: Vec<(Cmd, String)>, reboot: bool) {
-    let ctx = ctx.clone();
-    set_busy(&ctx, true);
-    glib::spawn_future_local(async move {
-        let mut log = String::new();
-        let mut ok = true;
-        for (c, fp) in commands {
-            let mut argv: Vec<String> = Vec::new();
-            if ctx.pkexec {
-                argv.push("pkexec".into());
+/// What the thread that runs hwtool tells the window.
+enum Msg {
+    /// Command number `0` starts.
+    Begin(usize),
+    /// A line of its standard output: a progress event.
+    Out(String),
+    /// A line of its standard error.
+    Err(String),
+    /// It ended with this exit status; the flag says it was the last one.
+    Exit(Option<i32>, bool),
+    /// It could not be started.
+    NoStart(String),
+}
+
+/// Call `f` with each line `r` gives, as it arrives.
+fn each_line(r: impl Read, mut f: impl FnMut(String)) {
+    let mut r = BufReader::new(r);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                f(line.trim_end_matches(['\n', '\r']).to_string());
             }
-            argv.extend(base_args(&ctx));
-            argv.extend(c.argv(&["--yes".to_string(), "--expect-plan".to_string(), fp]));
-            let os: Vec<&OsStr> = argv.iter().map(OsStr::new).collect();
-            let proc = match gio::Subprocess::newv(
-                &os,
-                gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_MERGE,
-            ) {
-                Ok(p) => p,
-                Err(e) => {
-                    log.push_str(&format!("cannot start {}: {e}\n", argv[0]));
-                    ok = false;
-                    break;
-                }
-            };
-            match proc.communicate_utf8_future(None).await {
-                Ok((out, _)) => {
-                    log.push_str(out.as_deref().unwrap_or(""));
-                    if proc.exit_status() != 0 {
-                        ok = false;
-                        break;
+        }
+    }
+}
+
+/// Run the commands one after the other, stopping at the first that fails,
+/// and send what they print. Runs in a thread of its own.
+fn run_commands(commands: Vec<Vec<String>>, tx: mpsc::Sender<Msg>) {
+    let count = commands.len();
+    for (i, argv) in commands.into_iter().enumerate() {
+        let _ = tx.send(Msg::Begin(i));
+        let child = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Msg::NoStart(format!("cannot start {}: {e}", argv[0])));
+                return;
+            }
+        };
+        let errors = child.stderr.take().map(|e| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                each_line(e, |l| {
+                    let _ = tx.send(Msg::Err(l));
+                });
+            })
+        });
+        if let Some(out) = child.stdout.take() {
+            each_line(out, |l| {
+                let _ = tx.send(Msg::Out(l));
+            });
+        }
+        if let Some(h) = errors {
+            let _ = h.join();
+        }
+        let code = child.wait().ok().and_then(|s| s.code());
+        let _ = tx.send(Msg::Exit(code, i + 1 == count));
+        if code != Some(0) {
+            return;
+        }
+    }
+}
+
+/// Run the confirmed commands as administrator and show how they go.
+fn execute(ctx: &Shared, commands: Vec<Confirmed>) {
+    let mut argvs = Vec::new();
+    for c in &commands {
+        let mut argv: Vec<String> = Vec::new();
+        if ctx.pkexec {
+            argv.push("pkexec".into());
+        }
+        argv.extend(base_args(ctx));
+        argv.extend(c.cmd.argv(&[
+            "--yes".to_string(),
+            "--progress-json".to_string(),
+            "--expect-plan".to_string(),
+            c.fingerprint.clone(),
+        ]));
+        argvs.push(argv);
+    }
+    let plans: Vec<Vec<String>> = commands.into_iter().map(|c| c.steps).collect();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || run_commands(argvs, tx));
+    follow(ctx, Model::new(&plans), rx);
+}
+
+/// Show the change in a dialog and keep it up to date from `rx` until the
+/// change has ended. The window stays responsive: hwtool runs in another
+/// thread, and this only looks at what has arrived, a few times a second.
+fn follow(ctx: &Shared, mut model: Model, rx: mpsc::Receiver<Msg>) {
+    set_busy(ctx, true);
+    let view = ApplyView::new(&model);
+    view.dialog.present(Some(&ctx.window));
+    let ctx = ctx.clone();
+    glib::timeout_add_local(Duration::from_millis(80), move || {
+        loop {
+            match rx.try_recv() {
+                Ok(Msg::Begin(i)) => model.begin(i),
+                Ok(Msg::Out(l)) => model.line(&l),
+                Ok(Msg::Err(l)) => model.error_line(&l),
+                Ok(Msg::Exit(code, last)) => model.exit(code, last),
+                Ok(Msg::NoStart(e)) => model.spawn_failed(&e),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if !model.finished() {
+                        model.lost();
                     }
-                }
-                Err(e) => {
-                    log.push_str(&format!("{e}\n"));
-                    ok = false;
                     break;
                 }
             }
         }
-        set_busy(&ctx, false);
-        refresh(&ctx);
-        if ok {
-            let toast = adw::Toast::builder()
-                .title(if reboot {
-                    "Done. Reboot for the change to take effect."
-                } else {
-                    "Done."
-                })
-                .button_label("Details")
-                .timeout(8)
-                .build();
-            let ctx2 = ctx.clone();
-            toast.connect_button_clicked(move |_| output(&ctx2, "Done", &log));
-            ctx.toasts.add_toast(toast);
+        view.show(&model);
+        if model.finished() {
+            set_busy(&ctx, false);
+            refresh(&ctx);
+            glib::ControlFlow::Break
         } else {
-            output(&ctx, "The Change Failed", &log);
+            glib::ControlFlow::Continue
         }
     });
 }
 
-fn alert(ctx: &Ctx, heading: &str, body: &str) {
-    let d = adw::AlertDialog::new(Some(heading), Some(body));
-    d.add_response("close", "Close");
-    d.present(Some(&ctx.window));
+/// A recorded kernel switch, for screenshots: in the middle of installing
+/// the packages, or failed there and cleaned up.
+#[cfg(feature = "test-hooks")]
+fn demo_apply(ctx: &Shared, failed: bool) {
+    let steps = [
+        "Refresh the package lists",
+        "Save linux-image-edge-rockchip64 26.11.0-trunk",
+        "Save linux-dtb-edge-rockchip64 26.11.0-trunk",
+        "Back up /boot/armbianEnv.txt",
+        "Install the vendor kernel, device tree and U-Boot packages",
+        "Check that /boot points at the vendor kernel",
+        "Write the new /boot/armbianEnv.txt",
+        "Remove the edge packages",
+        "Show what the board boots next",
+    ];
+    let of = steps.len();
+    let (tx, rx) = mpsc::channel();
+    let send = |v: Value| {
+        let _ = tx.send(Msg::Out(v.to_string()));
+    };
+    let _ = tx.send(Msg::Begin(0));
+    send(serde_json::json!({
+        "event": "plan", "title": "Switch the kernel branch from edge to vendor",
+        "steps": steps, "reboot": true,
+    }));
+    let log = "/var/log/hwtool/20261115T093012Z.log";
+    send(serde_json::json!({"event": "log", "line": format!("Log: {log}")}));
+    for (i, title) in steps.iter().enumerate().take(5) {
+        let step = |state: &str| {
+            serde_json::json!({
+                "event": "step", "step": i + 1, "of": of, "title": title, "state": state,
+            })
+        };
+        send(step("running"));
+        send(serde_json::json!({
+            "event": "log", "line": format!("[{}/{of}] {title}", i + 1),
+        }));
+        if i < 4 {
+            send(step("done"));
+        }
+    }
+    for line in [
+        "Reading package lists...",
+        "Building dependency tree...",
+        "The following NEW packages will be installed:",
+        "  linux-dtb-vendor-rk35xx linux-image-vendor-rk35xx linux-u-boot-radxa-rock-4d-vendor",
+        "Unpacking linux-image-vendor-rk35xx (26.5.2) ...",
+    ] {
+        send(serde_json::json!({"event": "log", "line": line}));
+    }
+    send(serde_json::json!({
+        "event": "progress", "step": 5, "percent": 62.0,
+        "detail": "Unpacking linux-image-vendor-rk35xx (arm64)",
+    }));
+    if failed {
+        let why = "apt-get install -y linux-image-vendor-rk35xx linux-dtb-vendor-rk35xx \
+                   linux-u-boot-radxa-rock-4d-vendor exited with exit status: 100";
+        send(serde_json::json!({
+            "event": "log",
+            "line": "dpkg: error processing package linux-dtb-vendor-rk35xx (--configure):",
+        }));
+        send(serde_json::json!({
+            "event": "step", "step": 5, "of": of, "title": steps[4], "state": "failed",
+            "error": why,
+        }));
+        for title in [
+            "Put back /boot/armbianEnv.txt",
+            "Reinstall the old packages",
+        ] {
+            send(serde_json::json!({"event": "cleanup", "title": title, "state": "running"}));
+            send(serde_json::json!({"event": "log", "line": format!("Cleanup: {title}")}));
+            send(serde_json::json!({"event": "cleanup", "title": title, "state": "done"}));
+        }
+        send(serde_json::json!({
+            "event": "done", "ok": false, "log": log, "reboot": false, "failed_step": 5,
+            "error": format!("step 5 failed: {}: {why}", steps[4]),
+        }));
+        let _ = tx.send(Msg::Exit(Some(1), true));
+    } else {
+        // Stays in the middle of step 5: the sender is never dropped.
+        std::mem::forget(tx);
+    }
+    follow(ctx, Model::new(&[]), rx);
 }
 
-fn output(ctx: &Ctx, heading: &str, text: &str) {
-    let d = adw::AlertDialog::new(
-        Some(heading),
-        Some("What hwtool printed. The full log is in /var/log/hwtool."),
-    );
-    d.set_extra_child(Some(&plan_view(text.trim_end())));
+/// One step in the list of the running change.
+struct StepRow {
+    row: adw::ActionRow,
+    /// The step's number, a spinner, a check mark or an error sign.
+    mark: gtk::Stack,
+    title: String,
+    shown: RefCell<Option<(StepState, String)>>,
+}
+
+impl StepRow {
+    fn new(number: usize, title: &str) -> Self {
+        let row = adw::ActionRow::builder().use_markup(false).build();
+        row.set_title(title);
+        row.set_subtitle_lines(3);
+        let mark = gtk::Stack::new();
+        mark.set_valign(gtk::Align::Center);
+        mark.set_size_request(24, 24);
+        let n = gtk::Label::new(Some(&number.to_string()));
+        n.add_css_class("dim-label");
+        n.add_css_class("numeric");
+        mark.add_named(&n, Some("waiting"));
+        let spinner = gtk::Spinner::new();
+        spinner.set_spinning(true);
+        mark.add_named(&spinner, Some("running"));
+        let done = icon("object-select-symbolic");
+        done.add_css_class("success");
+        mark.add_named(&done, Some("done"));
+        let failed = icon("dialog-error-symbolic");
+        failed.add_css_class("error");
+        mark.add_named(&failed, Some("failed"));
+        row.add_prefix(&mark);
+        StepRow {
+            row,
+            mark,
+            title: title.to_string(),
+            shown: RefCell::new(None),
+        }
+    }
+
+    fn show(&self, step: &progress::Step) {
+        let subtitle = match (step.state, step.fraction) {
+            (StepState::Running, Some(f)) if step.detail.is_empty() => {
+                format!("{:.0} %", f * 100.0)
+            }
+            (StepState::Running, Some(f)) => format!("{:.0} %, {}", f * 100.0, step.detail),
+            (StepState::Running, None) => step.detail.clone(),
+            // Why a step failed is shown in full above the list.
+            _ => String::new(),
+        };
+        let now = Some((step.state, subtitle));
+        if *self.shown.borrow() == now {
+            return;
+        }
+        if let Some((state, subtitle)) = &now {
+            self.mark.set_visible_child_name(match state {
+                StepState::Waiting => "waiting",
+                StepState::Running => "running",
+                StepState::Done => "done",
+                StepState::Failed => "failed",
+            });
+            self.row.set_subtitle(subtitle);
+        }
+        *self.shown.borrow_mut() = now;
+    }
+}
+
+/// The dialog shown while a change runs and until its result is closed:
+/// where it is, a progress bar, the steps and hwtool's output.
+struct ApplyView {
+    dialog: adw::Dialog,
+    headline: gtk::Label,
+    bar: gtk::ProgressBar,
+    status: gtk::Label,
+    /// The steps and the output, scrolled together.
+    scroll: gtk::ScrolledWindow,
+    body: gtk::Box,
+    list: gtk::ListBox,
+    rows: RefCell<Vec<StepRow>>,
+    output: gtk::Expander,
+    log: gtk::TextView,
+    log_end: gtk::TextMark,
+    /// Number of output lines already in `log`.
+    logged: Cell<usize>,
+    /// The running step the list was last scrolled to.
+    at: Cell<Option<usize>>,
+    close: gtk::Button,
+    ended: Cell<bool>,
+}
+
+impl ApplyView {
+    fn new(model: &Model) -> Self {
+        let headline = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        headline.add_css_class("title-4");
+        let bar = gtk::ProgressBar::new();
+        bar.set_pulse_step(0.04);
+        let status = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        status.add_css_class("dim-label");
+        let top = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        top.set_margin_top(6);
+        top.set_margin_bottom(12);
+        top.set_margin_start(18);
+        top.set_margin_end(18);
+        top.append(&headline);
+        top.append(&bar);
+        top.append(&status);
+
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::None);
+        list.add_css_class("boxed-list");
+
+        let log = gtk::TextView::builder()
+            .editable(false)
+            .cursor_visible(false)
+            .monospace(true)
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .top_margin(12)
+            .bottom_margin(12)
+            .left_margin(12)
+            .right_margin(12)
+            .build();
+        log.add_css_class("plan");
+        let buffer = log.buffer();
+        let log_end = buffer.create_mark(None, &buffer.end_iter(), false);
+        let log_scroll = gtk::ScrolledWindow::builder()
+            .child(&log)
+            .min_content_height(220)
+            .max_content_height(220)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .margin_top(8)
+            .build();
+        log_scroll.add_css_class("card");
+        let output = gtk::Expander::builder()
+            .label("Output")
+            .child(&log_scroll)
+            .build();
+
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        body.set_margin_top(6);
+        body.set_margin_bottom(18);
+        body.set_margin_start(18);
+        body.set_margin_end(18);
+        body.append(&list);
+        body.append(&output);
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&body)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(460)
+            .vexpand(true)
+            .build();
+
+        let close = gtk::Button::with_label("Close");
+        close.set_sensitive(false);
+        close.set_halign(gtk::Align::Center);
+        close.set_margin_top(12);
+        close.set_margin_bottom(12);
+        close.add_css_class("pill");
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&top);
+        content.append(&scroll);
+        let header = adw::HeaderBar::new();
+        header.set_show_start_title_buttons(false);
+        header.set_show_end_title_buttons(false);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&content));
+        view.add_bottom_bar(&close);
+        let dialog = adw::Dialog::builder()
+            .title("Applying the Change")
+            .content_width(640)
+            .can_close(false)
+            .child(&view)
+            .build();
+        let d = dialog.downgrade();
+        close.connect_clicked(move |_| {
+            if let Some(d) = d.upgrade() {
+                d.force_close();
+            }
+        });
+
+        let v = ApplyView {
+            dialog,
+            headline,
+            bar,
+            status,
+            scroll,
+            body,
+            list,
+            rows: RefCell::new(Vec::new()),
+            output,
+            log,
+            log_end,
+            logged: Cell::new(0),
+            at: Cell::new(None),
+            close,
+            ended: Cell::new(false),
+        };
+        v.show(model);
+        v
+    }
+
+    /// Bring every widget in line with the model.
+    fn show(&self, model: &Model) {
+        // The steps, made again if hwtool's plan is not the list shown.
+        let same = {
+            let rows = self.rows.borrow();
+            rows.len() == model.steps.len()
+                && rows
+                    .iter()
+                    .zip(&model.steps)
+                    .all(|(r, s)| r.title == s.title)
+        };
+        if !same {
+            let mut rows = self.rows.borrow_mut();
+            for r in rows.drain(..) {
+                self.list.remove(&r.row);
+            }
+            for (i, s) in model.steps.iter().enumerate() {
+                let r = StepRow::new(i + 1, &s.title);
+                self.list.append(&r.row);
+                rows.push(r);
+            }
+        }
+        self.list.set_visible(!model.steps.is_empty());
+        for (r, s) in self.rows.borrow().iter().zip(&model.steps) {
+            r.show(s);
+        }
+
+        self.headline.set_label(&model.headline());
+        let status = model.status();
+        self.status
+            .set_label(if status.is_empty() { " " } else { &status });
+        if model.indeterminate() {
+            self.bar.pulse();
+        } else {
+            self.bar.set_fraction(model.fraction());
+        }
+
+        // New output, and keep its end in view.
+        let buffer = self.log.buffer();
+        let from = self.logged.get();
+        if model.log.len() > from {
+            let mut text = model.log[from..].join("\n");
+            text.push('\n');
+            buffer.insert(&mut buffer.end_iter(), &text);
+            self.logged.set(model.log.len());
+            self.log.scroll_mark_onscreen(&self.log_end);
+        }
+
+        // Keep the running step in view.
+        let running = model.running();
+        if running.is_some() && running != self.at.get() {
+            self.at.set(running);
+            let rows = self.rows.borrow();
+            if let Some(b) = running
+                .and_then(|i| rows.get(i))
+                .and_then(|r| r.row.compute_bounds(&self.body))
+            {
+                let top = f64::from(b.y());
+                let bottom = top + f64::from(b.height());
+                self.scroll
+                    .vadjustment()
+                    .clamp_page(top - 24.0, bottom + 24.0);
+            }
+        }
+
+        if model.finished() && !self.ended.replace(true) {
+            let failed = matches!(model.outcome, Outcome::Failed { .. });
+            self.dialog.set_title(match &model.outcome {
+                Outcome::Failed { .. } if model.headline() == "Nothing was changed" => {
+                    "Nothing Was Changed"
+                }
+                Outcome::Failed { .. } => "The Change Failed",
+                _ => "Change Applied",
+            });
+            // The result is read in full and can be copied.
+            self.status.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            self.status.set_wrap(true);
+            self.status.set_selectable(true);
+            self.status.remove_css_class("dim-label");
+            if failed {
+                self.headline.add_css_class("error");
+                self.output.set_expanded(true);
+            }
+            self.dialog.set_can_close(true);
+            self.close.set_sensitive(true);
+            self.close.add_css_class("suggested-action");
+            self.close.grab_focus();
+        }
+    }
+}
+
+fn alert(ctx: &Ctx, heading: &str, body: &str) {
+    let d = adw::AlertDialog::new(Some(heading), Some(body));
     d.add_response("close", "Close");
     d.present(Some(&ctx.window));
 }
